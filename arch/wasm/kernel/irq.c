@@ -176,7 +176,7 @@ trigger_irq_for_cpu(unsigned int cpu, irq_hw_number_t irq)
 }
 
 __attribute__((export_name("trigger_irq"))) void
-trigger_irq(irq_hw_number_t irq)
+trigger_irq(unsigned int irq)
 {
 	trigger_irq_for_cpu(READ_ONCE(irq_target[irq]), irq);
 }
