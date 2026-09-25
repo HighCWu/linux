@@ -42,7 +42,11 @@ struct thread_struct {};
 
 #define task_pt_regs(task) ((struct pt_regs *)(task->stack + THREAD_SIZE) - 1)
 
+#ifdef CONFIG_64BIT
+#define TASK_SIZE (1UL << 34)
+#else
 #define TASK_SIZE U32_MAX
+#endif
 
 #define TASK_UNMAPPED_BASE 0
 

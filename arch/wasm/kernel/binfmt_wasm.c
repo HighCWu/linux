@@ -19,6 +19,7 @@
 #define WASM_EXEC_MAX_CHUNK_SIZE SZ_256K
 #define WASM_ARG_LIMIT SZ_256K
 #define WASM32_MAX_MEMORY_PAGES (1U << (32 - PAGE_SHIFT))
+#define WASM64_MAX_MEMORY_PAGES (1U << (34 - PAGE_SHIFT))
 
 /*
  * binfmt_wasm hands userland its arguments through a flat blob rather than the
@@ -61,10 +62,18 @@ static int load_wasm_binary(struct linux_binprm *bprm);
 static u32 user_memory_limit_pages(void)
 {
 	unsigned long limit = rlimit(RLIMIT_AS);
+	u32 maximum_pages;
+
+#ifdef CONFIG_64BIT
+	maximum_pages = WASM64_MAX_MEMORY_PAGES;
+#else
+	maximum_pages = WASM32_MAX_MEMORY_PAGES;
+#endif
 
 	/* WebAssembly memory limits are an intentional exec-time snapshot. */
-	return limit == RLIM_INFINITY ? WASM32_MAX_MEMORY_PAGES :
-				       limit / SZ_64K;
+	return limit == RLIM_INFINITY ? maximum_pages :
+				       min_t(unsigned long, limit / SZ_64K,
+					     maximum_pages);
 }
 
 static struct linux_binfmt wasm_format = {
@@ -379,7 +388,11 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 		goto err;
 	// point of no return starts here
 
+#ifdef CONFIG_64BIT
+	set_personality(PER_LINUX);
+#else
 	set_personality(PER_LINUX_32BIT);
+#endif
 	setup_new_exec(bprm);
 
 	set_binfmt(&wasm_format);

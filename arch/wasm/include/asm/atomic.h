@@ -29,9 +29,11 @@
 #define arch_atomic_or(i, v)		__atomic_or_fetch(&((v)->counter), (i), __ATOMIC_SEQ_CST)
 #define arch_atomic_or_return(i, v)	__atomic_or_fetch(&((v)->counter), (i), __ATOMIC_SEQ_CST)
 
+#ifndef CONFIG_64BIT
 typedef struct {
 	s64 counter;
 } atomic64_t;
+#endif
 #define ATOMIC64_INIT(i) { (i) }
 
 #define arch_atomic64_read(v)		__atomic_load_n(&((v)->counter), __ATOMIC_SEQ_CST)

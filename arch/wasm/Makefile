@@ -1,10 +1,22 @@
 LD = $(LLVM_PREFIX)wasm-ld$(LLVM_SUFFIX)
 
+KBUILD_DEFCONFIG := wasm32_defconfig
+
+ifeq ($(CONFIG_64BIT),y)
+wasm-abi-flags := -m64
+wasm-ld-emulation := -mwasm64
+wasm-max-memory := 17179869184
+else
+wasm-abi-flags := -m32
+wasm-ld-emulation := -mwasm32
+wasm-max-memory := 4294967296
+endif
+
 WASM_FEATURES = -matomics -mbulk-memory -mextended-const -mmultivalue -mmutable-globals -mnontrapping-fptoint -mreference-types -msign-ext -msimd128
 
-cflags-y += -Wno-incompatible-library-redeclaration -D__DISABLE_EXPORTS '-D__builtin_return_address=wasm_kernel_return_address' $(WASM_FEATURES) -mllvm -wasm-enable-sjlj
-aflags-y += -D__DISABLE_EXPORTS
-ldflags-y += --import-memory --max-memory=4294967296 --shared-memory --no-merge-data-segments --export-table
+cflags-y += $(wasm-abi-flags) -Wno-incompatible-library-redeclaration -D__DISABLE_EXPORTS '-D__builtin_return_address=wasm_kernel_return_address' $(WASM_FEATURES) -mllvm -wasm-enable-sjlj
+aflags-y += $(wasm-abi-flags) -D__DISABLE_EXPORTS
+ldflags-y += $(wasm-ld-emulation) --import-memory --max-memory=$(wasm-max-memory) --shared-memory --no-merge-data-segments --export-table
 
 KBUILD_CFLAGS += $(cflags-y)
 KBUILD_AFLAGS += $(aflags-y)

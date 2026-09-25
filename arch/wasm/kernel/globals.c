@@ -1,4 +1,5 @@
 #include <asm/smp.h>
+#include <asm/asm.h>
 #include <asm/page.h>
 #include <asm/thread_info.h>
 #include <linux/cache.h>
@@ -10,7 +11,7 @@ struct task_struct *current_tasks[NR_CPUS] = { 0 };
 struct screen_info screen_info = {};
 
 __asm__(".globaltype current_cpu, i32\ncurrent_cpu:\n"
-	".globaltype current_task, i32\ncurrent_task:\n"
+	".globaltype current_task, " WASM_PTR_TYPE "\ncurrent_task:\n"
 	".globaltype thread_done, i32\nthread_done:\n");
 
 void set_current_cpu(int cpu)

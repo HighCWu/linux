@@ -61,9 +61,21 @@ config ARCH_DMA_ADDR_T_64BIT
 config PHYS_ADDR_T_64BIT
 	def_bool 64BIT
 
+choice
+	prompt "Kernel address size"
+	default 32BIT
+	help
+	  A 64-bit kernel uses the WebAssembly Memory64 instruction encoding and
+	  requires a host with shared Memory64 support.  Keep 32-bit selected for
+	  the widest browser compatibility.
+
+config 32BIT
+	bool "32-bit kernel"
+
 config 64BIT
-	bool "64bit kernel"
-	default n
+	bool "64-bit kernel (Memory64)"
+
+endchoice
 
 config HIGHMEM
 	def_bool n

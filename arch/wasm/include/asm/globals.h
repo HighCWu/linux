@@ -1,9 +1,10 @@
 #ifndef _WASM_GLOBALS_H
 #define _WASM_GLOBALS_H
 
+#include <asm/asm.h>
 #include <linux/types.h>
 
-__asm__(".globaltype __stack_pointer, i32\n");
+__asm__(".globaltype __stack_pointer, " WASM_PTR_TYPE "\n");
 static inline void set_stack_pointer(void *ptr)
 {
 	__asm__ volatile("local.get %0\n"

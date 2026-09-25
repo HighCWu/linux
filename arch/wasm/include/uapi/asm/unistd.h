@@ -2,11 +2,15 @@
 #define _WASM_UNISTD_H
 #ifdef _WASM_UNISTD_H
 
+#include <asm/bitsperlong.h>
+
 #define __ARCH_WANT_RENAMEAT
+#if __BITS_PER_LONG == 32
 #define __ARCH_WANT_STAT64
-#define __ARCH_WANT_SET_GET_RLIMIT
 #define __ARCH_WANT_TIME32_SYSCALLS
 #define __ARCH_WANT_SYNC_FILE_RANGE2
+#endif
+#define __ARCH_WANT_SET_GET_RLIMIT
 #define __ARCH_WANT_NO_MEMORY_SYSCALLS
 #define __ARCH_WANT_NO_RT_SIGRETURN
 

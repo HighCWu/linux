@@ -45,7 +45,7 @@ struct thread_info {
 		.cpu = 0,                            \
 		.running_cpu = ATOMIC_INIT(0),       \
 		.context_mm = NULL,                  \
-		.tp_value = U32_MAX,                 \
+		.tp_value = ~0UL,                    \
 		.active_siginfo = NULL,              \
 	}
 

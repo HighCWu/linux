@@ -42,7 +42,7 @@ my $first = 1;
 while (<>) {
     last if /^\s*data\.drop\b/;
 
-    if (/i32\.const (\d+)/) {
+    if (/i(?:32|64)\.const (\d+)/) {
         push @stack, $1;
         next;
     }
