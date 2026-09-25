@@ -1,7 +1,10 @@
+name: Build kernels
+
 on:
   push:
     branches:
       - "**"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -9,12 +12,18 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - wasm32
+          - wasm64
     steps:
       - uses: actions/checkout@v4
       - uses: NixOS/nix-installer-action@main
-      - run: nix build . --print-build-logs
+      - run: nix build ".#${{ matrix.variant }}" --print-build-logs
       - run: cp -L result linux.tgz
       - uses: actions/upload-artifact@v4
         with:
-          name: kernel
+          name: kernel-${{ matrix.variant }}
           path: linux.tgz

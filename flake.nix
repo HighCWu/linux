@@ -18,38 +18,43 @@
             let
               pkgs = nixpkgs.legacyPackages.${system};
               llvm = pkgs.llvmPackages_19;
+              kernel =
+                variant: defconfig:
+                pkgs.stdenvNoCC.mkDerivation {
+                  pname = "linux-${variant}";
+                  version = "7.1.5-wasm";
+                  src = ./.;
+
+                  nativeBuildInputs = with pkgs; [
+                    perl
+                    bc
+                    bison
+                    flex
+
+                    pkg-config
+                    ncurses
+
+                    dtc
+                    llvm.clang-unwrapped
+                    llvm.lld
+                    llvm.libllvm
+
+                    wabt
+                  ];
+
+                  HOSTCC = "${llvm.clang}/bin/clang";
+                  KBUILD_BUILD_TIMESTAMP = "1970-01-01 00:00:00 UTC";
+
+                  enableParallelBuilding = true;
+                  configurePhase = "make HOSTCC=$HOSTCC -j$NIX_BUILD_CORES ${defconfig}";
+                  buildPhase = "make HOSTCC=$HOSTCC -j$NIX_BUILD_CORES vmlinux.wasm";
+                  installPhase = "cp vmlinux.wasm $out";
+                };
             in
-            {
-              default = pkgs.stdenvNoCC.mkDerivation {
-                pname = "linux";
-                version = "7.1.5-wasm";
-                src = ./.;
-
-                nativeBuildInputs = with pkgs; [
-                  perl
-                  bc
-                  bison
-                  flex
-
-                  pkg-config
-                  ncurses
-
-                  dtc
-                  llvm.clang-unwrapped
-                  llvm.lld
-                  llvm.libllvm
-
-                  wabt
-                ];
-
-                HOSTCC = "${llvm.clang}/bin/clang";
-                KBUILD_BUILD_TIMESTAMP = "1970-01-01 00:00:00 UTC";
-
-                enableParallelBuilding = true;
-                configurePhase = "make HOSTCC=$HOSTCC -j$NIX_BUILD_CORES defconfig";
-                buildPhase = "make HOSTCC=$HOSTCC -j$NIX_BUILD_CORES vmlinux.wasm";
-                installPhase = "cp vmlinux.wasm $out";
-              };
+            rec {
+              wasm32 = kernel "wasm32" "wasm32_defconfig";
+              wasm64 = kernel "wasm64" "wasm64_defconfig";
+              default = wasm32;
             }
           );
     };
