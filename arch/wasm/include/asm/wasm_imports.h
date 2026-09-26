@@ -68,6 +68,14 @@ int wasm_import(user, futex_atomic_op)(int *oldval, u32 __user *uaddr,
 int wasm_import(user, futex_atomic_cmpxchg)(u32 *oldval, u32 __user *uaddr,
 					    u32 expected, u32 replacement);
 
+/*
+ * Direct anonymous mappings live in the process WebAssembly.Memory.  The
+ * owner worker calls the user runtime synchronously so allocation metadata is
+ * copied naturally by fork together with the rest of that memory.
+ */
+long wasm_import(user, mmap)(unsigned long len);
+long wasm_import(user, munmap)(unsigned long addr, unsigned long len);
+
 #ifdef CONFIG_VIRTIO_WASM
 void wasm_import(virtio, set_features)(u32 id, u64 features);
 

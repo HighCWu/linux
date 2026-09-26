@@ -1,4 +1,6 @@
 #include <linux/entry-common.h>
+#include <linux/mman.h>
+#include <linux/overflow.h>
 #include <linux/rcupdate.h>
 #include <linux/syscalls.h>
 #include <asm/irq.h>
@@ -85,6 +87,47 @@ SYSCALL_DEFINE1(set_thread_area, unsigned long, addr)
 	struct thread_info *ti = task_thread_info(current);
 	ti->tp_value = addr;
 	return 0;
+}
+
+/*
+ * CONFIG_MMU remains disabled.  These wrappers deliberately implement only
+ * direct, anonymous mappings: the returned number is an ordinary offset in
+ * the caller's WebAssembly.Memory and needs no address translation.  The
+ * process-local runtime owns the allocator because it already owns brk and is
+ * the only layer that can prevent the two direct allocation paths from
+ * overlapping.
+ */
+SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot,
+		unsigned long, flags, long, fd, unsigned long, pgoff)
+{
+	const unsigned long supported_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+
+	if (!len || pgoff || fd != -1 || (flags & MAP_TYPE) != MAP_PRIVATE ||
+	    !(flags & MAP_ANONYMOUS))
+		return -EINVAL;
+	if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE))
+		return -ENOMEM;
+	if ((flags & ~supported_flags) || prot != (PROT_READ | PROT_WRITE))
+		return -EINVAL;
+	if (len > ULONG_MAX - (PAGE_SIZE - 1))
+		return -ENOMEM;
+
+	(void)addr;
+	return wasm_user_mmap(ALIGN(len, PAGE_SIZE));
+}
+
+SYSCALL_DEFINE2(wasm_munmap, unsigned long, addr, size_t, len)
+{
+	unsigned long rounded;
+
+	if (!PAGE_ALIGNED(addr) || !len ||
+	    check_add_overflow(len, PAGE_SIZE - 1, &rounded))
+		return -EINVAL;
+	rounded &= PAGE_MASK;
+	if (check_add_overflow(addr, rounded, &addr))
+		return -EINVAL;
+
+	return wasm_user_munmap(addr - rounded, rounded);
 }
 
 __attribute__((export_name("get_thread_area"))) unsigned long

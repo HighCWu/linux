@@ -16,6 +16,24 @@
 
 #include <asm-generic/unistd.h>
 
+/*
+ * wasm keeps the generic NOMMU memory syscalls disabled: their VMA and file
+ * mapping model cannot describe a directly-dereferenceable WebAssembly linear
+ * memory address.  Anonymous mmap and munmap nevertheless have their standard
+ * asm-generic numbers and are implemented by arch-specific direct-memory
+ * wrappers.
+ */
+#define __NR_munmap 215
+__SYSCALL(__NR_munmap, sys_wasm_munmap)
+
+#define __NR3264_mmap 222
+__SYSCALL(__NR3264_mmap, sys_wasm_mmap)
+#if __BITS_PER_LONG == 64
+#define __NR_mmap __NR3264_mmap
+#else
+#define __NR_mmap2 __NR3264_mmap
+#endif
+
 #define __NR_set_thread_area (__NR_arch_specific_syscall + 0)
 __SYSCALL(__NR_set_thread_area, sys_set_thread_area)
 
