@@ -100,13 +100,18 @@ SYSCALL_DEFINE1(set_thread_area, unsigned long, addr)
 SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot,
 		unsigned long, flags, long, fd, unsigned long, pgoff)
 {
-	const unsigned long supported_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+	const unsigned long supported_flags = MAP_PRIVATE | MAP_ANONYMOUS |
+		MAP_FIXED_NOREPLACE;
 
 	if (!len || pgoff || fd != -1 || (flags & MAP_TYPE) != MAP_PRIVATE ||
 	    !(flags & MAP_ANONYMOUS))
 		return -EINVAL;
-	if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE))
+	if (flags & MAP_FIXED)
 		return -ENOMEM;
+	if ((flags & MAP_FIXED_NOREPLACE) && !addr)
+		return -ENOMEM;
+	if ((flags & MAP_FIXED_NOREPLACE) && !PAGE_ALIGNED(addr))
+		return -EINVAL;
 	if ((flags & ~supported_flags) || prot != (PROT_READ | PROT_WRITE))
 		return -EINVAL;
 	if (len > ULONG_MAX - (PAGE_SIZE - 1))
