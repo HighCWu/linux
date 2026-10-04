@@ -76,6 +76,15 @@ int wasm_import(user, futex_atomic_cmpxchg)(u32 *oldval, u32 __user *uaddr,
 long wasm_import(user, mmap)(unsigned long len);
 long wasm_import(user, munmap)(unsigned long addr, unsigned long len);
 
+/*
+ * Versioned mapping requests retain the complete validated syscall shape so
+ * later direct allocators can implement hints and fixed placement without
+ * another incompatible function-signature change.
+ */
+long wasm_import(user_v2, mmap)(unsigned long addr, unsigned long len,
+				unsigned int prot, unsigned int flags, int fd,
+				unsigned long pgoff);
+
 #ifdef CONFIG_VIRTIO_WASM
 void wasm_import(virtio, set_features)(u32 id, u64 features);
 

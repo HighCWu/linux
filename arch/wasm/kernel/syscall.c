@@ -112,8 +112,8 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 	if (len > ULONG_MAX - (PAGE_SIZE - 1))
 		return -ENOMEM;
 
-	(void)addr;
-	return wasm_user_mmap(ALIGN(len, PAGE_SIZE));
+	return wasm_user_v2_mmap(addr, ALIGN(len, PAGE_SIZE), prot, flags, fd,
+				 pgoff);
 }
 
 SYSCALL_DEFINE2(wasm_munmap, unsigned long, addr, size_t, len)
