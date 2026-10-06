@@ -2,18 +2,36 @@
 /* Private, opt-in fixtures, not Linux UAPI or production file mmap. */
 #include <linux/anon_inodes.h>
 #include <linux/file.h>
+#include <linux/erofs.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/uio.h>
 #include <asm/wasm_imports.h>
+#include <asm/virtio_snapshot.h>
 
 struct wasm_test_file {
 	size_t size;
 	unsigned int mode;
 	u8 data[];
 };
+
+/* Query only. Neither this fixture nor the helpers admit standard file mmap. */
+SYSCALL_DEFINE1(wasm_mmap_provenance_test, int, fd)
+{
+	struct file *file = fget(fd);
+	struct super_block *sb;
+	long result;
+
+	if (!file)
+		return -EBADF;
+	sb = file_inode(file)->i_sb;
+	result = erofs_is_single_bdev(sb) &&
+		wasm_bdev_has_snapshot_source(sb->s_bdev);
+	fput(file);
+	return result;
+}
 
 static ssize_t test_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 {

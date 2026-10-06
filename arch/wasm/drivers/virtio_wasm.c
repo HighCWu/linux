@@ -2,6 +2,8 @@
 #define pr_fmt(fmt) "virtio-wasm: " fmt
 
 #include <asm/wasm_imports.h>
+#include <asm/virtio_snapshot.h>
+#include <linux/blkdev.h>
 #include <linux/device.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
@@ -13,6 +15,7 @@
 #include <linux/virtio_config.h>
 #include <linux/virtio_ring.h>
 #include <linux/virtio.h>
+#include <linux/virtio_blk.h>
 
 #define to_virtio_wasm_device(_plat_dev) \
 	container_of(_plat_dev, struct virtio_wasm_device, vdev)
@@ -346,6 +349,32 @@ static const struct virtio_config_ops virtio_wasm_config_ops = {
 	.set_vq_affinity = vw_set_vq_affinity,
 	.get_vq_affinity = vw_get_vq_affinity,
 };
+
+/* The caller holds the mounted bdev alive. Boot provenance is not a live
+ * device-health test, and does not alone establish filesystem immutability. */
+bool wasm_bdev_has_snapshot_source(struct block_device *bdev)
+{
+	struct virtio_wasm_device *transport;
+	struct virtio_device *vdev;
+	struct device *parent;
+	u32 version;
+
+	if (!bdev || bdev->bd_partno)
+		return false;
+	parent = disk_to_dev(bdev->bd_disk)->parent;
+	if (!parent || !is_virtio_device(parent))
+		return false;
+	vdev = dev_to_virtio(parent);
+	if (vdev->config != &virtio_wasm_config_ops ||
+	    vdev->id.device != VIRTIO_ID_BLOCK ||
+	    !virtio_has_feature(vdev, VIRTIO_BLK_F_RO))
+		return false;
+	transport = to_virtio_wasm_device(vdev);
+	return !of_property_read_u32(transport->pdev->dev.of_node,
+				     "lowland,snapshot-image-v1", &version) &&
+		version == 1;
+}
+EXPORT_SYMBOL_GPL(wasm_bdev_has_snapshot_source);
 
 static void virtio_wasm_release_dev(struct device *_d)
 {

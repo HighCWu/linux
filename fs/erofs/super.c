@@ -12,12 +12,26 @@
 #include <linux/exportfs.h>
 #include <linux/backing-dev.h>
 #include <linux/pseudo_fs.h>
+#include <linux/erofs.h>
 #include "xattr.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/erofs.h>
 
 static struct kmem_cache *erofs_inode_cachep __read_mostly;
+
+/* A conservative topology query, not a promise about backing immutability. */
+bool erofs_is_single_bdev(struct super_block *sb)
+{
+	struct erofs_sb_info *sbi;
+
+	if (!sb || sb->s_op != &erofs_sops || !sb->s_bdev)
+		return false;
+	sbi = EROFS_SB(sb);
+	return sbi->devs && !sbi->devs->extra_devices &&
+		!sbi->dif0.file && !sbi->dif0.fscache && !sbi->dif0.fsoff;
+}
+EXPORT_SYMBOL_GPL(erofs_is_single_bdev);
 
 void _erofs_printk(struct super_block *sb, const char *fmt, ...)
 {
