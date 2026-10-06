@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Private, opt-in fixtures, not Linux UAPI or production file mmap. */
+#include <linux/anon_inodes.h>
+#include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/syscalls.h>
+#include <linux/uio.h>
+#include <asm/wasm_imports.h>
+
+struct wasm_test_file {
+	size_t size;
+	unsigned int mode;
+	u8 data[];
+};
+
+static ssize_t test_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+{
+	struct wasm_test_file *data = iocb->ki_filp->private_data;
+	loff_t pos = iocb->ki_pos;
+	size_t count, copied;
+
+	if (pos < 0)
+		return -EINVAL;
+	if (data->mode == 3)
+		return -EINTR;
+	if (data->mode && pos >= 7)
+		return data->mode == 1 ? 0 : -EIO;
+	if (pos >= data->size)
+		return 0;
+	count = min_t(size_t, iov_iter_count(iter), data->size - pos);
+	if (data->mode)
+		count = min_t(size_t, count, 7 - pos);
+	copied = copy_to_iter(data->data + pos, count, iter);
+	iocb->ki_pos += copied;
+	return copied || !count ? copied : -EFAULT;
+}
+
+static loff_t test_llseek(struct file *file, loff_t offset, int whence)
+{
+	struct wasm_test_file *data = file->private_data;
+
+	return fixed_size_llseek(file, offset, whence, data->size);
+}
+
+static int test_release(struct inode *inode, struct file *file)
+{
+	kfree(file->private_data);
+	return 0;
+}
+
+static int test_open(struct inode *inode, struct file *file)
+{
+	/* anon_inode_getfile creates the sole initialized file directly; prevent
+	 * reopening its inode with a new, uninitialized private_data pointer. */
+	return -ENXIO;
+}
+
+/* Only this fixture owns these bytes; there are no write, truncate or mmap
+ * operations. An arbitrary O_RDONLY descriptor is NOT an immutable file. */
+static const struct file_operations test_file_ops = {
+	.open = test_open,
+	.read_iter = test_read_iter,
+	.llseek = test_llseek,
+	.release = test_release,
+};
+
+SYSCALL_DEFINE1(wasm_mmap_file_create_test, unsigned int, mode)
+{
+	const size_t size = 2 * PAGE_SIZE + 7;
+	struct wasm_test_file *data;
+	struct file *file;
+	size_t i;
+	int fd;
+
+	if (mode > 3)
+		return -EINVAL;
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0)
+		return fd;
+	data = kmalloc(sizeof(*data) + size, GFP_KERNEL);
+	if (!data) {
+		put_unused_fd(fd);
+		return -ENOMEM;
+	}
+	data->size = size;
+	data->mode = mode;
+	for (i = 0; i < size; i++)
+		data->data[i] = (u8)(i * 37 + 11);
+	file = anon_inode_getfile("wasm-mmap-test", &test_file_ops, data, O_RDONLY);
+	if (IS_ERR(file)) {
+		kfree(data);
+		put_unused_fd(fd);
+		return PTR_ERR(file);
+	}
+	fd_install(fd, file);
+	return fd;
+}
+
+SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
+		u32, offset_low, u32, offset_high)
+{
+	u64 offset = ((u64)offset_high << 32) | offset_low;
+	unsigned long rounded;
+	struct wasm_test_file *data;
+	struct file *file;
+	loff_t position;
+	size_t count, done = 0;
+	u8 *staging;
+	long result;
+
+	if (!length || length > 2 * PAGE_SIZE || offset > LLONG_MAX ||
+	    !PAGE_ALIGNED(offset))
+		return -EINVAL;
+	rounded = ALIGN(length, PAGE_SIZE);
+	file = fget(fd);
+	if (!file)
+		return -EBADF;
+	result = -EOPNOTSUPP;
+	if (file->f_op != &test_file_ops)
+		goto put;
+	data = file->private_data;
+	result = -EINVAL;
+	/* Permit the last partial page, but never a page wholly beyond EOF. */
+	if (offset >= data->size || rounded > ALIGN(data->size - offset, PAGE_SIZE))
+		goto put;
+	count = min_t(u64, rounded, data->size - offset);
+	staging = kmalloc(count, GFP_KERNEL);
+	result = -ENOMEM;
+	if (!staging)
+		goto put;
+	position = offset;
+	while (done < count) {
+		ssize_t read = kernel_read(file, staging + done, count - done, &position);
+
+		if (read <= 0) {
+			result = read ? read : -EIO;
+			goto free;
+		}
+		done += read;
+	}
+	result = wasm_user_mmap_init_v1_map(rounded, staging, count);
+free:
+	kfree(staging);
+put:
+	fput(file);
+	return result;
+}
