@@ -31,6 +31,15 @@ config CMDLINE
 config MMU
 	def_bool n
 
+config WASM_MMAP_COPY_TEST
+	bool "Enable experimental staging-copy test syscall"
+	default n
+	help
+	  Internal bring-up fixture for the synchronous initialized-copy bridge.
+	  Uses an architecture-private syscall slot only in dedicated test kernels.
+	  This is not a supported userspace ABI or file mmap implementation.
+	  Say N for release kernels.
+
 config EARLY_PRINTK
 	def_bool y
 

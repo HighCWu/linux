@@ -3,6 +3,9 @@
 #include <linux/overflow.h>
 #include <linux/rcupdate.h>
 #include <linux/syscalls.h>
+#ifdef CONFIG_WASM_MMAP_COPY_TEST
+#include <linux/slab.h>
+#endif
 #include <asm/irq.h>
 #include <asm/remote_vm.h>
 
@@ -13,12 +16,21 @@
 
 typedef asmlinkage long (*syscall_handler_t)(const struct pt_regs *regs);
 
+#ifdef CONFIG_WASM_MMAP_COPY_TEST
+/* Deliberately absent from UAPI headers and default kernels. */
+#define WASM_MMAP_COPY_TEST_NR (__NR_arch_specific_syscall + 9)
+asmlinkage long sys_wasm_mmap_copy_test(const struct pt_regs *regs);
+#endif
+
 #undef __SYSCALL
 #define __SYSCALL(nr, sym) [nr] = (syscall_handler_t)sym,
 
 syscall_handler_t syscall_table[__NR_syscalls] = {
 	[0 ... __NR_syscalls - 1] = (syscall_handler_t)sys_ni_syscall,
 #include <asm/unistd.h>
+#ifdef CONFIG_WASM_MMAP_COPY_TEST
+	[WASM_MMAP_COPY_TEST_NR] = sys_wasm_mmap_copy_test,
+#endif
 #undef sys_sigaltstack
 };
 
@@ -134,6 +146,29 @@ SYSCALL_DEFINE2(wasm_munmap, unsigned long, addr, size_t, len)
 
 	return wasm_user_munmap(addr - rounded, rounded);
 }
+
+#ifdef CONFIG_WASM_MMAP_COPY_TEST
+/* Bounded, kernel-owned synthetic data; no file read or asynchronous producer.
+ * Keep ownership until the allocator's synchronous copy/publication returns. */
+SYSCALL_DEFINE1(wasm_mmap_copy_test, unsigned long, length)
+{
+	const unsigned long rounded = 2 * PAGE_SIZE;
+	u8 *staging;
+	unsigned long i;
+	long result;
+
+	if (length > rounded)
+		return -EINVAL;
+	staging = kmalloc(rounded, GFP_KERNEL);
+	if (!staging)
+		return -ENOMEM;
+	for (i = 0; i < length; i++)
+		staging[i] = (u8)(i * 37 + 11);
+	result = wasm_user_mmap_init_v1_map(rounded, staging, length);
+	kfree(staging);
+	return result;
+}
+#endif
 
 __attribute__((export_name("get_thread_area"))) unsigned long
 wasm_get_thread_area(void)

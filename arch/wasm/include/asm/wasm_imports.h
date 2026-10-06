@@ -85,6 +85,11 @@ long wasm_import(user_v2, mmap)(unsigned long addr, unsigned long len,
 				unsigned int prot, unsigned int flags, int fd,
 				unsigned long pgoff);
 
+/* Caller owns a quiescent staging buffer until this synchronous call returns.
+ * This experimental execution primitive does not admit Linux file mappings. */
+long wasm_import(user_mmap_init_v1, map)(unsigned long rounded,
+				       const void *source, unsigned long length);
+
 #ifdef CONFIG_VIRTIO_WASM
 void wasm_import(virtio, set_features)(u32 id, u64 features);
 
