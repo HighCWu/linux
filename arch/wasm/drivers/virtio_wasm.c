@@ -359,7 +359,7 @@ bool wasm_bdev_has_snapshot_source(struct block_device *bdev)
 	struct device *parent;
 	u32 version;
 
-	if (!bdev || bdev->bd_partno)
+	if (!bdev || bdev_is_partition(bdev))
 		return false;
 	parent = disk_to_dev(bdev->bd_disk)->parent;
 	if (!parent || !is_virtio_device(parent))
