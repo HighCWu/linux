@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Private, opt-in fixtures, not Linux UAPI or production file mmap. */
 #include <linux/anon_inodes.h>
+#include <linux/atomic.h>
 #include <linux/completion.h>
 #include <linux/file.h>
 #include <linux/erofs.h>
@@ -11,6 +12,27 @@
 #include <linux/uio.h>
 #include <asm/wasm_imports.h>
 #include <asm/virtio_snapshot.h>
+
+/* Kernel-global gauges, never reset by a caller. Only this opt-in fixture's
+ * resources are counted, not all kernel allocations or user allocator state.
+ */
+static atomic_t test_requests = ATOMIC_INIT(0);
+static atomic_t test_staging = ATOMIC_INIT(0);
+static atomic_t test_files = ATOMIC_INIT(0);
+
+SYSCALL_DEFINE1(wasm_mmap_stats_test, unsigned int, selector)
+{
+	switch (selector) {
+	case 0:
+		return atomic_read(&test_requests);
+	case 1:
+		return atomic_read(&test_staging);
+	case 2:
+		return atomic_read(&test_files);
+	default:
+		return -EINVAL;
+	}
+}
 
 struct wasm_test_file {
 	size_t size;
@@ -83,6 +105,7 @@ static loff_t test_llseek(struct file *file, loff_t offset, int whence)
 static int test_release(struct inode *inode, struct file *file)
 {
 	kfree(file->private_data);
+	atomic_dec(&test_files);
 	return 0;
 }
 
@@ -156,6 +179,7 @@ SYSCALL_DEFINE1(wasm_mmap_file_create_test, unsigned int, mode)
 		put_unused_fd(fd);
 		return PTR_ERR(file);
 	}
+	atomic_inc(&test_files);
 	fd_install(fd, file);
 	return fd;
 }
@@ -179,6 +203,7 @@ SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
 	file = fget(fd);
 	if (!file)
 		return -EBADF;
+	atomic_inc(&test_requests);
 	result = -EOPNOTSUPP;
 	if (file->f_op == &test_file_ops) {
 		struct wasm_test_file *data = file->private_data;
@@ -205,6 +230,7 @@ SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
 	result = -ENOMEM;
 	if (!staging)
 		goto put;
+	atomic_inc(&test_staging);
 	position = offset;
 	while (done < count) {
 		ssize_t read = kernel_read(file, staging + done, count - done, &position);
@@ -218,7 +244,9 @@ SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
 	result = wasm_user_mmap_init_v1_map(rounded, staging, count);
 free:
 	kfree(staging);
+	atomic_dec(&test_staging);
 put:
 	fput(file);
+	atomic_dec(&test_requests);
 	return result;
 }

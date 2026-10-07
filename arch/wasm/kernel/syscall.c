@@ -23,6 +23,7 @@ asmlinkage long sys_wasm_mmap_copy_test(const struct pt_regs *regs);
 asmlinkage long sys_wasm_mmap_file_create_test(const struct pt_regs *regs);
 asmlinkage long sys_wasm_mmap_file_read_test(const struct pt_regs *regs);
 asmlinkage long sys_wasm_mmap_provenance_test(const struct pt_regs *regs);
+asmlinkage long sys_wasm_mmap_stats_test(const struct pt_regs *regs);
 #endif
 
 #undef __SYSCALL
@@ -36,6 +37,7 @@ syscall_handler_t syscall_table[__NR_syscalls] = {
 	[__NR_arch_specific_syscall + 10] = sys_wasm_mmap_file_create_test,
 	[__NR_arch_specific_syscall + 11] = sys_wasm_mmap_file_read_test,
 	[__NR_arch_specific_syscall + 12] = sys_wasm_mmap_provenance_test,
+	[__NR_arch_specific_syscall + 13] = sys_wasm_mmap_stats_test,
 #endif
 #undef sys_sigaltstack
 };
