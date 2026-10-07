@@ -17,18 +17,23 @@ struct wasm_test_file {
 	u8 data[];
 };
 
+static bool test_snapshot_source(struct file *file)
+{
+	struct super_block *sb = file_inode(file)->i_sb;
+
+	return erofs_is_single_bdev(sb) &&
+		wasm_bdev_has_snapshot_source(sb->s_bdev);
+}
+
 /* Query only. Neither this fixture nor the helpers admit standard file mmap. */
 SYSCALL_DEFINE1(wasm_mmap_provenance_test, int, fd)
 {
 	struct file *file = fget(fd);
-	struct super_block *sb;
 	long result;
 
 	if (!file)
 		return -EBADF;
-	sb = file_inode(file)->i_sb;
-	result = erofs_is_single_bdev(sb) &&
-		wasm_bdev_has_snapshot_source(sb->s_bdev);
+	result = test_snapshot_source(file);
 	fput(file);
 	return result;
 }
@@ -121,8 +126,8 @@ SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
 {
 	u64 offset = ((u64)offset_high << 32) | offset_low;
 	unsigned long rounded;
-	struct wasm_test_file *data;
 	struct file *file;
+	loff_t size;
 	loff_t position;
 	size_t count, done = 0;
 	u8 *staging;
@@ -136,14 +141,27 @@ SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
 	if (!file)
 		return -EBADF;
 	result = -EOPNOTSUPP;
-	if (file->f_op != &test_file_ops)
+	if (file->f_op == &test_file_ops) {
+		struct wasm_test_file *data = file->private_data;
+
+		size = data->size;
+	} else if (S_ISREG(file_inode(file)->i_mode) && test_snapshot_source(file)) {
+		/* Experimental eager copy only: regular files on the verified single
+		 * snapshot bdev. No generic read-only, initramfs or overlay admission. */
+		size = i_size_read(file_inode(file));
+	} else {
 		goto put;
-	data = file->private_data;
+	}
+	result = -EBADF;
+	if (!(file->f_mode & FMODE_READ))
+		goto put;
 	result = -EINVAL;
 	/* Permit the last partial page, but never a page wholly beyond EOF. */
-	if (offset >= data->size || rounded > ALIGN(data->size - offset, PAGE_SIZE))
+	/* Compare the start of the last requested page, avoiding EOF rounding
+	 * overflow for very large files. size is stable on the snapshot source. */
+	if (size <= 0 || offset >= size || rounded - PAGE_SIZE >= size - offset)
 		goto put;
-	count = min_t(u64, rounded, data->size - offset);
+	count = min_t(u64, rounded, size - offset);
 	staging = kmalloc(count, GFP_KERNEL);
 	result = -ENOMEM;
 	if (!staging)
