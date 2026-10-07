@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Private, opt-in fixtures, not Linux UAPI or production file mmap. */
 #include <linux/anon_inodes.h>
+#include <linux/completion.h>
 #include <linux/file.h>
 #include <linux/erofs.h>
 #include <linux/fs.h>
@@ -14,6 +15,8 @@
 struct wasm_test_file {
 	size_t size;
 	unsigned int mode;
+	struct completion entered;
+	struct completion proceed;
 	u8 data[];
 };
 
@@ -48,12 +51,22 @@ static ssize_t test_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 		return -EINVAL;
 	if (data->mode == 3)
 		return -EINTR;
-	if (data->mode && pos >= 7)
+	if ((data->mode == 4 && !pos) || (data->mode == 5 && pos >= 7)) {
+		int error;
+
+		complete_all(&data->entered);
+		error = wait_for_completion_interruptible(&data->proceed);
+		if (error)
+			return error;
+		if (data->mode == 5)
+			return -EIO;
+	}
+	if ((data->mode == 1 || data->mode == 2) && pos >= 7)
 		return data->mode == 1 ? 0 : -EIO;
 	if (pos >= data->size)
 		return 0;
 	count = min_t(size_t, iov_iter_count(iter), data->size - pos);
-	if (data->mode)
+	if (data->mode == 1 || data->mode == 2 || data->mode == 5)
 		count = min_t(size_t, count, 7 - pos);
 	copied = copy_to_iter(data->data + pos, count, iter);
 	iocb->ki_pos += copied;
@@ -80,6 +93,29 @@ static int test_open(struct inode *inode, struct file *file)
 	return -ENXIO;
 }
 
+/* Private barrier controls on the test inode only, with no pointer arguments.
+ * The controller keeps a separate descriptor; close/reuse of the reader's fd
+ * must not redirect the fget-pinned request to a different file.
+ */
+static long test_ioctl(struct file *file, unsigned int command, unsigned long arg)
+{
+	struct wasm_test_file *data = file->private_data;
+
+	if (data->mode < 4)
+		return -ENOTTY;
+	if (arg)
+		return -EINVAL;
+	switch (command) {
+	case 0x5770: /* WAIT_ENTERED */
+		return wait_for_completion_interruptible(&data->entered);
+	case 0x5771: /* PROCEED */
+		complete_all(&data->proceed);
+		return 0;
+	default:
+		return -ENOTTY;
+	}
+}
+
 /* Only this fixture owns these bytes; there are no write, truncate or mmap
  * operations. An arbitrary O_RDONLY descriptor is NOT an immutable file. */
 static const struct file_operations test_file_ops = {
@@ -87,6 +123,7 @@ static const struct file_operations test_file_ops = {
 	.read_iter = test_read_iter,
 	.llseek = test_llseek,
 	.release = test_release,
+	.unlocked_ioctl = test_ioctl,
 };
 
 SYSCALL_DEFINE1(wasm_mmap_file_create_test, unsigned int, mode)
@@ -97,7 +134,7 @@ SYSCALL_DEFINE1(wasm_mmap_file_create_test, unsigned int, mode)
 	size_t i;
 	int fd;
 
-	if (mode > 3)
+	if (mode > 5)
 		return -EINVAL;
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0)
@@ -109,6 +146,8 @@ SYSCALL_DEFINE1(wasm_mmap_file_create_test, unsigned int, mode)
 	}
 	data->size = size;
 	data->mode = mode;
+	init_completion(&data->entered);
+	init_completion(&data->proceed);
 	for (i = 0; i < size; i++)
 		data->data[i] = (u8)(i * 37 + 11);
 	file = anon_inode_getfile("wasm-mmap-test", &test_file_ops, data, O_RDONLY);
