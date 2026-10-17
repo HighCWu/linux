@@ -19,6 +19,24 @@
 static atomic_t test_requests = ATOMIC_INIT(0);
 static atomic_t test_staging = ATOMIC_INIT(0);
 static atomic_t test_files = ATOMIC_INIT(0);
+/* Bound simultaneous file-copy payloads, not all kernel/user memory. Charge
+ * both a full staging page range and its unpublished destination before any
+ * read starts. Published mappings remain the user allocator's responsibility.
+ * The fixed experimental policy is deliberately not a public ABI. */
+#define TEST_COPY_BUDGET (8 * PAGE_SIZE)
+static atomic_t test_reserved = ATOMIC_INIT(0);
+
+static bool test_reserve_copy(unsigned long rounded)
+{
+	int charge = 2 * rounded;
+	int used = atomic_read(&test_reserved);
+
+	do {
+		if (used > (int)TEST_COPY_BUDGET - charge)
+			return false;
+	} while (!atomic_try_cmpxchg(&test_reserved, &used, used + charge));
+	return true;
+}
 
 SYSCALL_DEFINE1(wasm_mmap_stats_test, unsigned int, selector)
 {
@@ -29,6 +47,8 @@ SYSCALL_DEFINE1(wasm_mmap_stats_test, unsigned int, selector)
 		return atomic_read(&test_staging);
 	case 2:
 		return atomic_read(&test_files);
+	case 3:
+		return atomic_read(&test_reserved);
 	default:
 		return -EINVAL;
 	}
@@ -226,10 +246,12 @@ SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
 	if (size <= 0 || offset >= size || rounded - PAGE_SIZE >= size - offset)
 		goto put;
 	count = min_t(u64, rounded, size - offset);
-	staging = kmalloc(count, GFP_KERNEL);
 	result = -ENOMEM;
-	if (!staging)
+	if (!test_reserve_copy(rounded))
 		goto put;
+	staging = kmalloc(count, GFP_KERNEL);
+	if (!staging)
+		goto unreserve;
 	atomic_inc(&test_staging);
 	position = offset;
 	while (done < count) {
@@ -245,6 +267,8 @@ SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
 free:
 	kfree(staging);
 	atomic_dec(&test_staging);
+unreserve:
+	atomic_sub(2 * rounded, &test_reserved);
 put:
 	fput(file);
 	atomic_dec(&test_requests);
