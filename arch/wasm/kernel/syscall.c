@@ -8,6 +8,7 @@
 #endif
 #include <asm/irq.h>
 #include <asm/remote_vm.h>
+#include <asm/mmap_file.h>
 
 #define sys_sigaltstack sys_wasm_sigaltstack
 #undef __SYSCALL
@@ -123,6 +124,10 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 	const unsigned long supported_flags = MAP_PRIVATE | MAP_ANONYMOUS |
 		MAP_FIXED_NOREPLACE;
 
+#ifdef CONFIG_WASM_FILE_MMAP
+	if (!(flags & MAP_ANONYMOUS))
+		return wasm_mmap_file(addr, len, prot, flags, fd, pgoff);
+#endif
 	if (!len || pgoff || fd != -1 || (flags & MAP_TYPE) != MAP_PRIVATE ||
 	    !(flags & MAP_ANONYMOUS))
 		return -EINVAL;

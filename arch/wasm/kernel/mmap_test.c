@@ -4,53 +4,26 @@
 #include <linux/atomic.h>
 #include <linux/completion.h>
 #include <linux/file.h>
-#include <linux/erofs.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/uio.h>
 #include <asm/wasm_imports.h>
-#include <asm/virtio_snapshot.h>
+#include <asm/mmap_file.h>
 
 /* Kernel-global gauges, never reset by a caller. Only this opt-in fixture's
  * resources are counted, not all kernel allocations or user allocator state.
  */
-static atomic_t test_requests = ATOMIC_INIT(0);
-static atomic_t test_staging = ATOMIC_INIT(0);
 static atomic_t test_files = ATOMIC_INIT(0);
-/* Bound simultaneous file-copy payloads, not all kernel/user memory. Charge
- * both a full staging page range and its unpublished destination before any
- * read starts. Published mappings remain the user allocator's responsibility.
- * The fixed experimental policy is deliberately not a public ABI. */
-#define TEST_COPY_BUDGET (8 * PAGE_SIZE)
-static atomic_t test_reserved = ATOMIC_INIT(0);
-
-static bool test_reserve_copy(unsigned long rounded)
-{
-	int charge = 2 * rounded;
-	int used = atomic_read(&test_reserved);
-
-	do {
-		if (used > (int)TEST_COPY_BUDGET - charge)
-			return false;
-	} while (!atomic_try_cmpxchg(&test_reserved, &used, used + charge));
-	return true;
-}
 
 SYSCALL_DEFINE1(wasm_mmap_stats_test, unsigned int, selector)
 {
 	switch (selector) {
-	case 0:
-		return atomic_read(&test_requests);
-	case 1:
-		return atomic_read(&test_staging);
 	case 2:
 		return atomic_read(&test_files);
-	case 3:
-		return atomic_read(&test_reserved);
 	default:
-		return -EINVAL;
+		return wasm_mmap_copy_stat(selector);
 	}
 }
 
@@ -62,14 +35,6 @@ struct wasm_test_file {
 	u8 data[];
 };
 
-static bool test_snapshot_source(struct file *file)
-{
-	struct super_block *sb = file_inode(file)->i_sb;
-
-	return erofs_is_single_bdev(sb) &&
-		wasm_bdev_has_snapshot_source(sb->s_bdev);
-}
-
 /* Query only. Neither this fixture nor the helpers admit standard file mmap. */
 SYSCALL_DEFINE1(wasm_mmap_provenance_test, int, fd)
 {
@@ -78,7 +43,7 @@ SYSCALL_DEFINE1(wasm_mmap_provenance_test, int, fd)
 
 	if (!file)
 		return -EBADF;
-	result = test_snapshot_source(file);
+	result = wasm_mmap_snapshot_source(file);
 	fput(file);
 	return result;
 }
@@ -208,28 +173,22 @@ SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
 		u32, offset_low, u32, offset_high)
 {
 	u64 offset = ((u64)offset_high << 32) | offset_low;
-	unsigned long rounded;
 	struct file *file;
 	loff_t size;
-	loff_t position;
-	size_t count, done = 0;
-	u8 *staging;
 	long result;
 
 	if (!length || length > 2 * PAGE_SIZE || offset > LLONG_MAX ||
 	    !PAGE_ALIGNED(offset))
 		return -EINVAL;
-	rounded = ALIGN(length, PAGE_SIZE);
 	file = fget(fd);
 	if (!file)
 		return -EBADF;
-	atomic_inc(&test_requests);
 	result = -EOPNOTSUPP;
 	if (file->f_op == &test_file_ops) {
 		struct wasm_test_file *data = file->private_data;
 
 		size = data->size;
-	} else if (S_ISREG(file_inode(file)->i_mode) && test_snapshot_source(file)) {
+	} else if (S_ISREG(file_inode(file)->i_mode) && wasm_mmap_snapshot_source(file)) {
 		/* Experimental eager copy only: regular files on the verified single
 		 * snapshot bdev. No generic read-only, initramfs or overlay admission. */
 		size = i_size_read(file_inode(file));
@@ -239,38 +198,8 @@ SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
 	result = -EBADF;
 	if (!(file->f_mode & FMODE_READ))
 		goto put;
-	result = -EINVAL;
-	/* Permit the last partial page, but never a page wholly beyond EOF. */
-	/* Compare the start of the last requested page, avoiding EOF rounding
-	 * overflow for very large files. size is stable on the snapshot source. */
-	if (size <= 0 || offset >= size || rounded - PAGE_SIZE >= size - offset)
-		goto put;
-	count = min_t(u64, rounded, size - offset);
-	result = -ENOMEM;
-	if (!test_reserve_copy(rounded))
-		goto put;
-	staging = kmalloc(count, GFP_KERNEL);
-	if (!staging)
-		goto unreserve;
-	atomic_inc(&test_staging);
-	position = offset;
-	while (done < count) {
-		ssize_t read = kernel_read(file, staging + done, count - done, &position);
-
-		if (read <= 0) {
-			result = read ? read : -EIO;
-			goto free;
-		}
-		done += read;
-	}
-	result = wasm_user_mmap_init_v1_map(rounded, staging, count);
-free:
-	kfree(staging);
-	atomic_dec(&test_staging);
-unreserve:
-	atomic_sub(2 * rounded, &test_reserved);
+	result = wasm_mmap_copy_file(file, length, offset, size);
 put:
 	fput(file);
-	atomic_dec(&test_requests);
 	return result;
 }

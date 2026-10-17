@@ -21,3 +21,4 @@ obj-y += \
 
 obj-$(CONFIG_SMP) += smp.o
 obj-$(CONFIG_WASM_MMAP_COPY_TEST) += mmap_test.o
+obj-$(CONFIG_WASM_FILE_COPY_CORE) += mmap_file.o

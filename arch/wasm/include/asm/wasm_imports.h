@@ -89,6 +89,9 @@ long wasm_import(user_v2, mmap)(unsigned long addr, unsigned long len,
  * This experimental execution primitive does not admit Linux file mappings. */
 long wasm_import(user_mmap_init_v1, map)(unsigned long rounded,
 				       const void *source, unsigned long length);
+/* Bit 0: current user module exports the initialized-copy v1 allocator.
+ * A capability never authorizes a file source or promises page protection. */
+unsigned int wasm_import(user_mmap_init_v1, capabilities)(void);
 
 #ifdef CONFIG_VIRTIO_WASM
 void wasm_import(virtio, set_features)(u32 id, u64 features);
