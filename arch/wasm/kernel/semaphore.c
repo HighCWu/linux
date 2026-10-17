@@ -353,8 +353,14 @@ SYSCALL_DEFINE2(wasm_sem_timedwait, int, fd,
 		error = -EFAULT;
 		goto out_fdput;
 	}
-	if (!timespec64_valid(&expires_ts)) {
+	if (expires_ts.tv_nsec < 0 || expires_ts.tv_nsec >= NSEC_PER_SEC) {
 		error = -EINVAL;
+		goto out_fdput;
+	}
+	/* A negative absolute realtime deadline is expired, not malformed.
+	 * Check nanoseconds first, but preserve the available-token fast path. */
+	if (expires_ts.tv_sec < 0) {
+		error = -ETIMEDOUT;
 		goto out_fdput;
 	}
 	expires = timespec64_to_ktime(expires_ts);
