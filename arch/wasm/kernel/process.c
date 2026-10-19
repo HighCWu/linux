@@ -4,6 +4,7 @@
 #include <asm/sysmem.h>
 #include <asm/wasm_imports.h>
 #include <linux/entry-common.h>
+#include <linux/preempt.h>
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
 #include <linux/sched/task.h>
@@ -177,6 +178,19 @@ static void task_entry(void *args)
 }
 
 int wasm_call_clone_fn(void *arg);
+
+/*
+ * The host waits for a private-memory snapshot inside copy_thread(), before
+ * the child becomes runnable. A long host atomic wait must not monopolize a
+ * logical CPU and prevent RCU/timers from making progress. The host calls this
+ * only between bounded wait slices on that sleepable kernel stack, never from
+ * userspace, a signal callback, or an atomic section.
+ */
+__attribute__((export_name("copy_worker_wait"))) void wasm_copy_worker_wait(void)
+{
+	BUG_ON(in_atomic() || irqs_disabled());
+	schedule_timeout_uninterruptible(1);
+}
 
 int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 {
