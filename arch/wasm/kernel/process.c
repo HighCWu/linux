@@ -37,6 +37,13 @@ static __noreturn void abort_task_entry(struct task_bootstrap_args *args)
 	__builtin_unreachable();
 }
 
+/* Let loaders refuse post-copy failure features on older kernel blobs. */
+__attribute__((export_name("fork_worker_abort_abi")))
+int wasm_fork_worker_abort_abi(void)
+{
+	return 1;
+}
+
 void exit_thread(struct task_struct *p)
 {
 	struct thread_info *info = task_thread_info(p);
