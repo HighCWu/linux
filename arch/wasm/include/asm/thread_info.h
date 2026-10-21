@@ -7,6 +7,7 @@
 struct kernel_siginfo;
 struct mm_struct;
 struct task_bootstrap_args;
+struct wasm_signal_frame;
 
 /*
  * A remote wake changes the value parked workers wait on, so publishing a
@@ -33,6 +34,7 @@ struct thread_info {
 	struct mm_struct *context_mm;
 	unsigned long tp_value;
 	const struct kernel_siginfo *active_siginfo;
+	const struct wasm_signal_frame *active_signal_frame;
 	/* Non-NULL only until a newly-created Worker starts or is aborted. */
 	struct task_bootstrap_args *bootstrap_args;
 };
@@ -51,6 +53,7 @@ struct thread_info {
 		.context_mm = NULL,                  \
 		.tp_value = ~0UL,                    \
 		.active_siginfo = NULL,              \
+		.active_signal_frame = NULL,         \
 		.bootstrap_args = NULL,              \
 	}
 

@@ -60,6 +60,12 @@ int wasm_import(user, call_siginfo_handler)(uintptr_t trampoline,
 					    uintptr_t fn, u32 sig);
 void wasm_import(user, halt_signal_handler)(void);
 
+/* Versioned execution ABI, not a Linux application interface. */
+int wasm_import(user_signal_v1, stack_pointer)(unsigned long *sp);
+int wasm_import(user_signal_v1, call_handler)(uintptr_t trampoline,
+		uintptr_t fn, u32 sig, unsigned long sp, unsigned long base,
+		unsigned long size, u32 flags);
+
 int wasm_import(user, read)(void *to, const void __user *from, unsigned long n);
 int wasm_import(user, write)(void __user *to, const void *from, unsigned long n);
 int wasm_import(user, write_zeroes)(void __user *to, unsigned long n);

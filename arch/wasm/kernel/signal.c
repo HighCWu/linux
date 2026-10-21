@@ -4,6 +4,13 @@
 #include <linux/errno.h>
 #include <linux/signal.h>
 #include <linux/syscalls.h>
+#include <linux/overflow.h>
+#include <linux/uaccess.h>
+
+struct wasm_signal_frame {
+	stack_t stack;
+	sigset_t mask;
+};
 
 static void syscall_restart(struct pt_regs *regs, bool handler,
 			    const struct k_sigaction *ka)
@@ -45,7 +52,35 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	 * the return mask before signal_setup_done clears restore_sigmask,
 	 * just as a native signal frame would do for rt_sigreturn. */
 	sigset_t saved_mask = *sigmask_to_save();
+	struct wasm_signal_frame frame;
+	const struct wasm_signal_frame *previous_frame = ti->active_signal_frame;
+	const kernel_siginfo_t *previous_info = ti->active_siginfo;
+	unsigned long sp = 0, end;
+	u32 callback_flags = (sa->sa_flags & SA_SIGINFO) ? 1 : 0;
 	int failed = 0;
+	int sp_error = wasm_user_signal_v1_stack_pointer(&sp);
+
+	/* The public stack object has padding on LP64. Never disclose it. */
+	memset(&frame, 0, sizeof(frame));
+	frame.stack.ss_sp = (void __user *)current->sas_ss_sp;
+	frame.stack.ss_size = current->sas_ss_size;
+	frame.stack.ss_flags = current->sas_ss_flags;
+	frame.mask = saved_mask;
+
+	/* Old modules may still receive ordinary callbacks without a C stack
+	 * export. A registered alternative stack, however, requires the v1 ABI. */
+	if (sp_error && current->sas_ss_size) {
+		force_sigsegv(ksig->sig);
+		return;
+	}
+	if ((sa->sa_flags & SA_ONSTACK) && !sas_ss_flags(sp)) {
+		if (check_add_overflow(current->sas_ss_sp, current->sas_ss_size, &end)) {
+			force_sigsegv(ksig->sig);
+			return;
+		}
+		sp = end & ~15UL;
+		callback_flags |= 2;
+	}
 
 	/*
 	 * wasm invokes the userspace handler synchronously. Mirror the mask setup
@@ -53,6 +88,8 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	 * then restore it in place of rt_sigreturn when the callback returns.
 	 */
 	signal_setup_done(0, ksig, 0);
+	ti->active_signal_frame = &frame;
+	ti->active_siginfo = (sa->sa_flags & SA_SIGINFO) ? &ksig->info : NULL;
 
 	/*
 	 * The callback runs userspace code before the outer syscall exit has
@@ -64,18 +101,10 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	exit_to_user_mode();
 	local_irq_enable();
 
-	if (sa->sa_flags & SA_SIGINFO) {
-		const kernel_siginfo_t *previous = ti->active_siginfo;
-
-		ti->active_siginfo = &ksig->info;
-		failed = wasm_user_call_siginfo_handler(
-			(uintptr_t)sa->sa_restorer, (uintptr_t)sa->sa_handler,
-			ksig->sig);
-		ti->active_siginfo = previous;
-	} else {
-		wasm_user_call_signal_handler((uintptr_t)sa->sa_handler,
-					      ksig->sig);
-	}
+	failed = wasm_user_signal_v1_call_handler(
+		(uintptr_t)sa->sa_restorer, (uintptr_t)sa->sa_handler, ksig->sig,
+		sp, (unsigned long)frame.stack.ss_sp, frame.stack.ss_size,
+		callback_flags);
 
 	local_irq_disable();
 	enter_from_user_mode(regs);
@@ -87,6 +116,14 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	 * restart decision across those calls.
 	 */
 	*regs = saved_regs;
+	ti->active_signal_frame = previous_frame;
+	ti->active_siginfo = previous_info;
+	/* Like rt_sigreturn, normal callback completion restores the saved
+	 * registration, including one temporarily disabled by SS_AUTODISARM.
+	 * A SjLj exit skips this restoration and keeps the disarmed state. */
+	current->sas_ss_sp = (unsigned long)frame.stack.ss_sp;
+	current->sas_ss_size = frame.stack.ss_size;
+	current->sas_ss_flags = frame.stack.ss_flags;
 	set_current_blocked(&saved_mask);
 	if (failed)
 		force_sigsegv(ksig->sig);
@@ -104,6 +141,18 @@ __attribute__((export_name("clear_siginfo"))) void
 wasm_clear_active_siginfo(void)
 {
 	current_thread_info()->active_siginfo = NULL;
+	current_thread_info()->active_signal_frame = NULL;
+}
+
+__attribute__((export_name("copy_signal_frame"))) int
+wasm_copy_active_signal_frame(stack_t __user *stack, sigset_t __user *mask)
+{
+	const struct wasm_signal_frame *frame = current_thread_info()->active_signal_frame;
+
+	if (!frame)
+		return -EINVAL;
+	return copy_to_user(stack, &frame->stack, sizeof(frame->stack)) ||
+	       copy_to_user(mask, &frame->mask, sizeof(frame->mask)) ? -EFAULT : 0;
 }
 
 void arch_do_signal_or_restart(struct pt_regs *regs)

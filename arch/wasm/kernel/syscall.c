@@ -9,8 +9,8 @@
 #include <asm/irq.h>
 #include <asm/remote_vm.h>
 #include <asm/mmap_file.h>
+#include <asm/wasm_imports.h>
 
-#define sys_sigaltstack sys_wasm_sigaltstack
 /* SysV queues/semaphores copy through uaccess and need no shared mapping.
  * Generic NOMMU shmat would instead return a kernel-linear address that is
  * not a mapping in this process's independent user WebAssembly.Memory.
@@ -48,7 +48,6 @@ syscall_handler_t syscall_table[__NR_syscalls] = {
 	[__NR_arch_specific_syscall + 12] = sys_wasm_mmap_provenance_test,
 	[__NR_arch_specific_syscall + 13] = sys_wasm_mmap_stats_test,
 #endif
-#undef sys_sigaltstack
 #undef sys_shmget
 #undef sys_shmctl
 #undef sys_shmat
@@ -61,6 +60,10 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 	     unsigned long arg5)
 {
 	struct pt_regs *regs = current_pt_regs();
+	unsigned long sp = 0;
+	int sp_error = wasm_user_signal_v1_stack_pointer(&sp);
+
+	regs->user_sp = sp;
 
 	regs->syscall_args[0] = arg0;
 	regs->syscall_args[1] = arg1;
@@ -91,7 +94,9 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 		wasm_timer_check();
 		wasm_service_remote_request(current);
 
-		if (nr < 0 || nr >= ARRAY_SIZE(syscall_table))
+		if (nr == __NR_sigaltstack && sp_error)
+			regs->syscall_return = sp_error;
+		else if (nr < 0 || nr >= ARRAY_SIZE(syscall_table))
 			regs->syscall_return = -ENOSYS;
 		else
 			regs->syscall_return = syscall_table[nr](regs);
@@ -103,16 +108,6 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 			return regs->syscall_return;
 		nr = regs->restart_syscall_nr;
 	}
-}
-
-/*
- * The generic implementation queries the unavailable wasm userspace stack
- * pointer and traps. Until alternate signal stacks are implementable, expose
- * the unsupported syscall honestly instead.
- */
-SYSCALL_DEFINE0(wasm_sigaltstack)
-{
-	return -ENOSYS;
 }
 
 SYSCALL_DEFINE0(wasm_shm_unavailable)

@@ -7,6 +7,8 @@ struct pt_regs {
 	long syscall_return;
 	long restart_syscall_nr;
 	int user_mode;
+	/* Linear-memory C stack, not the engine's opaque operand/call stack. */
+	unsigned long user_sp;
 };
 
 struct sigcontext {

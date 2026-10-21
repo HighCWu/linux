@@ -8,7 +8,7 @@ struct task_struct;
 
 #define user_mode(regs) (regs->user_mode)
 #define instruction_pointer(regs) (-1)
-#define user_stack_pointer(regs) (__builtin_trap(),0)
+#define user_stack_pointer(regs) ((regs)->user_sp)
 
 static inline long arch_ptrace(struct task_struct *child, long request,
 			       unsigned long addr, unsigned long data)
