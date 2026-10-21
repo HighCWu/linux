@@ -232,7 +232,7 @@ SYSCALL_DEFINE2(wasm_munmap, unsigned long, addr, size_t, len)
 	    check_add_overflow(len, PAGE_SIZE - 1, &rounded))
 		return -EINVAL;
 	rounded &= PAGE_MASK;
-	if (check_add_overflow(addr, rounded, &addr))
+	if (check_add_overflow(addr, rounded, &addr) || addr > TASK_SIZE)
 		return -EINVAL;
 
 	return wasm_user_munmap(addr - rounded, rounded);
