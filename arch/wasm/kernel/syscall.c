@@ -181,6 +181,25 @@ SYSCALL_DEFINE5(wasm_mremap, unsigned long, addr, unsigned long, old_len,
 	return wasm_user_v2_mremap(addr, old_rounded, new_rounded, flags);
 }
 
+/* No VMA or file writeback is invented here. All supported direct mappings
+ * are private; the process allocator must authenticate complete coverage. */
+SYSCALL_DEFINE3(wasm_msync, unsigned long, addr, size_t, len, int, flags)
+{
+	unsigned long rounded, end;
+
+	if (!PAGE_ALIGNED(addr) || (flags & ~(MS_ASYNC | MS_SYNC | MS_INVALIDATE)) ||
+	    ((flags & MS_ASYNC) && (flags & MS_SYNC)))
+		return -EINVAL;
+	if (!len)
+		return 0;
+	if (check_add_overflow(len, PAGE_SIZE - 1, &rounded))
+		return -ENOMEM;
+	rounded &= PAGE_MASK;
+	if (check_add_overflow(addr, rounded, &end) || end > TASK_SIZE)
+		return -ENOMEM;
+	return wasm_user_v2_msync(addr, rounded, flags);
+}
+
 SYSCALL_DEFINE2(wasm_munmap, unsigned long, addr, size_t, len)
 {
 	unsigned long rounded;

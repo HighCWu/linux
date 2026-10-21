@@ -31,6 +31,9 @@ __SYSCALL(__NR_munmap, sys_wasm_munmap)
 #define __NR_mremap 216
 __SYSCALL(__NR_mremap, sys_wasm_mremap)
 
+#define __NR_msync 227
+__SYSCALL(__NR_msync, sys_wasm_msync)
+
 #define __NR3264_mmap 222
 __SYSCALL(__NR3264_mmap, sys_wasm_mmap)
 #if __BITS_PER_LONG == 64
