@@ -122,7 +122,7 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 		unsigned long, flags, long, fd, unsigned long, pgoff)
 {
 	const unsigned long supported_flags = MAP_PRIVATE | MAP_ANONYMOUS |
-		MAP_FIXED_NOREPLACE;
+		MAP_FIXED | MAP_FIXED_NOREPLACE;
 
 #ifdef CONFIG_WASM_FILE_MMAP
 	if (!(flags & MAP_ANONYMOUS))
@@ -131,16 +131,21 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 	if (!len || pgoff || fd != -1 || (flags & MAP_TYPE) != MAP_PRIVATE ||
 	    !(flags & MAP_ANONYMOUS))
 		return -EINVAL;
-	if (flags & MAP_FIXED)
+	if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && !addr)
 		return -ENOMEM;
-	if ((flags & MAP_FIXED_NOREPLACE) && !addr)
-		return -ENOMEM;
-	if ((flags & MAP_FIXED_NOREPLACE) && !PAGE_ALIGNED(addr))
+	if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && !PAGE_ALIGNED(addr))
 		return -EINVAL;
 	if ((flags & ~supported_flags) || prot != (PROT_READ | PROT_WRITE))
 		return -EINVAL;
 	if (len > ULONG_MAX - (PAGE_SIZE - 1))
 		return -ENOMEM;
+	if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) &&
+	    (addr >= TASK_SIZE || ALIGN(len, PAGE_SIZE) > TASK_SIZE - addr))
+		return -ENOMEM;
+	if ((flags & MAP_FIXED) && !(flags & MAP_FIXED_NOREPLACE))
+		return wasm_user_v2_mmap_fixed(addr, ALIGN(len, PAGE_SIZE));
+	/* NOREPLACE takes priority even when the caller also supplies FIXED. */
+	flags &= ~MAP_FIXED;
 
 	return wasm_user_v2_mmap(addr, ALIGN(len, PAGE_SIZE), prot, flags, fd,
 				 pgoff);

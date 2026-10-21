@@ -72,6 +72,7 @@ long wasm_import(user_v2, mremap)(unsigned long addr, unsigned long old_len,
 				unsigned long new_len, unsigned long flags);
 long wasm_import(user_v2, msync)(unsigned long addr, unsigned long len, int flags);
 long wasm_import(user_v2, madvise)(unsigned long addr, unsigned long len, int advice);
+long wasm_import(user_v2, mmap_fixed)(unsigned long addr, unsigned long len);
 
 /*
  * Direct anonymous mappings live in the process WebAssembly.Memory.  The
