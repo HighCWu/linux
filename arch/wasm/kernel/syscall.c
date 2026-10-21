@@ -163,11 +163,8 @@ SYSCALL_DEFINE5(wasm_mremap, unsigned long, addr, unsigned long, old_len,
 	if (!PAGE_ALIGNED(addr) || !new_len || (flags & ~7UL) ||
 	    ((flags & (MREMAP_FIXED | MREMAP_DONTUNMAP)) && !(flags & MREMAP_MAYMOVE)))
 		return -EINVAL;
-	if (flags & MREMAP_FIXED) {
-		if (!PAGE_ALIGNED(new_addr))
-			return -EINVAL;
-		return -EOPNOTSUPP;
-	}
+	if ((flags & MREMAP_FIXED) && !PAGE_ALIGNED(new_addr))
+		return -EINVAL;
 	/* Linux's old_len=0 shared alias operation is not a private direct copy. */
 	if (!old_len)
 		return -EOPNOTSUPP;
@@ -183,6 +180,13 @@ SYSCALL_DEFINE5(wasm_mremap, unsigned long, addr, unsigned long, old_len,
 		return -EFAULT;
 	if (new_rounded > TASK_SIZE)
 		return -ENOMEM;
+	if (flags & MREMAP_FIXED) {
+		if (!new_addr || new_addr > TASK_SIZE || new_rounded > TASK_SIZE - new_addr)
+			return -ENOMEM;
+		if (new_addr < end && addr < new_addr + new_rounded)
+			return -EINVAL;
+		return wasm_user_v2_mremap_fixed(addr, old_rounded, new_rounded, new_addr);
+	}
 	return wasm_user_v2_mremap(addr, old_rounded, new_rounded, flags);
 }
 
