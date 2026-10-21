@@ -200,6 +200,25 @@ SYSCALL_DEFINE3(wasm_msync, unsigned long, addr, size_t, len, int, flags)
 	return wasm_user_v2_msync(addr, rounded, flags);
 }
 
+/* These hints apply only to registered direct mappings. DONTNEED discards
+ * anonymous bytes, not address reservations or WebAssembly memory capacity. */
+SYSCALL_DEFINE3(wasm_madvise, unsigned long, addr, size_t, len, int, advice)
+{
+	unsigned long rounded, end;
+
+	if (!PAGE_ALIGNED(addr) || advice < MADV_NORMAL || advice > MADV_DONTNEED ||
+	    check_add_overflow(len, PAGE_SIZE - 1, &rounded))
+		return -EINVAL;
+	if (!len)
+		return 0;
+	rounded &= PAGE_MASK;
+	if (check_add_overflow(addr, rounded, &end))
+		return -EINVAL;
+	if (end > TASK_SIZE)
+		return -ENOMEM;
+	return wasm_user_v2_madvise(addr, rounded, advice);
+}
+
 SYSCALL_DEFINE2(wasm_munmap, unsigned long, addr, size_t, len)
 {
 	unsigned long rounded;
