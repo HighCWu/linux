@@ -2,6 +2,7 @@
 #define _WASM_SYSCALL_WRAPPER_H
 
 #include <asm/ptrace.h>
+#include <asm/sigcontext.h>
 #include <linux/errno.h>
 
 #ifdef CONFIG_64BIT
