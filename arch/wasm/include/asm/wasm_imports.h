@@ -68,6 +68,9 @@ int wasm_import(user, futex_atomic_op)(int *oldval, u32 __user *uaddr,
 int wasm_import(user, futex_atomic_cmpxchg)(u32 *oldval, u32 __user *uaddr,
 					    u32 expected, u32 replacement);
 
+long wasm_import(user_v2, mremap)(unsigned long addr, unsigned long old_len,
+				unsigned long new_len, unsigned long flags);
+
 /*
  * Direct anonymous mappings live in the process WebAssembly.Memory.  The
  * owner worker calls the user runtime synchronously so allocation metadata is

@@ -146,6 +146,41 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 				 pgoff);
 }
 
+/* Direct linear memory has no movable page tables. The process allocator
+ * owns reservations shared with brk; it validates ownership and performs any
+ * admitted anonymous copy before publishing the replacement record. */
+SYSCALL_DEFINE5(wasm_mremap, unsigned long, addr, unsigned long, old_len,
+	       unsigned long, new_len, unsigned long, flags,
+	       unsigned long, new_addr)
+{
+	unsigned long old_rounded, new_rounded, end;
+
+	if (!PAGE_ALIGNED(addr) || !new_len || (flags & ~7UL) ||
+	    ((flags & (MREMAP_FIXED | MREMAP_DONTUNMAP)) && !(flags & MREMAP_MAYMOVE)))
+		return -EINVAL;
+	if (flags & MREMAP_FIXED) {
+		if (!PAGE_ALIGNED(new_addr))
+			return -EINVAL;
+		return -EOPNOTSUPP;
+	}
+	/* Linux's old_len=0 shared alias operation is not a private direct copy. */
+	if (!old_len)
+		return -EOPNOTSUPP;
+	if (check_add_overflow(old_len, PAGE_SIZE - 1, &old_rounded))
+		return -EINVAL;
+	if (check_add_overflow(new_len, PAGE_SIZE - 1, &new_rounded))
+		return -ENOMEM;
+	old_rounded &= PAGE_MASK;
+	new_rounded &= PAGE_MASK;
+	if (flags & MREMAP_DONTUNMAP)
+		return old_rounded == new_rounded ? -EOPNOTSUPP : -EINVAL;
+	if (check_add_overflow(addr, old_rounded, &end) || end > TASK_SIZE)
+		return -EFAULT;
+	if (new_rounded > TASK_SIZE)
+		return -ENOMEM;
+	return wasm_user_v2_mremap(addr, old_rounded, new_rounded, flags);
+}
+
 SYSCALL_DEFINE2(wasm_munmap, unsigned long, addr, size_t, len)
 {
 	unsigned long rounded;
