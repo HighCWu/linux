@@ -11,6 +11,14 @@
 #include <asm/mmap_file.h>
 
 #define sys_sigaltstack sys_wasm_sigaltstack
+/* SysV queues/semaphores copy through uaccess and need no shared mapping.
+ * Generic NOMMU shmat would instead return a kernel-linear address that is
+ * not a mapping in this process's independent user WebAssembly.Memory.
+ * Keep the entire SHM family unavailable until real shared backing exists. */
+#define sys_shmget sys_wasm_shm_unavailable
+#define sys_shmctl sys_wasm_shm_unavailable
+#define sys_shmat sys_wasm_shm_unavailable
+#define sys_shmdt sys_wasm_shm_unavailable
 #undef __SYSCALL
 #define __SYSCALL(nr, sym) asmlinkage long sym(const struct pt_regs *regs);
 #include <asm/unistd.h>
@@ -41,6 +49,10 @@ syscall_handler_t syscall_table[__NR_syscalls] = {
 	[__NR_arch_specific_syscall + 13] = sys_wasm_mmap_stats_test,
 #endif
 #undef sys_sigaltstack
+#undef sys_shmget
+#undef sys_shmctl
+#undef sys_shmat
+#undef sys_shmdt
 };
 
 __attribute__((export_name("syscall"))) long
@@ -99,6 +111,11 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
  * the unsupported syscall honestly instead.
  */
 SYSCALL_DEFINE0(wasm_sigaltstack)
+{
+	return -ENOSYS;
+}
+
+SYSCALL_DEFINE0(wasm_shm_unavailable)
 {
 	return -ENOSYS;
 }
