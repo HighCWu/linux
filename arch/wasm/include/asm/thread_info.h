@@ -34,7 +34,7 @@ struct thread_info {
 	struct mm_struct *context_mm;
 	unsigned long tp_value;
 	const struct kernel_siginfo *active_siginfo;
-	const struct wasm_signal_frame *active_signal_frame;
+	struct wasm_signal_frame *active_signal_frame;
 	/* Non-NULL only until a newly-created Worker starts or is aborted. */
 	struct task_bootstrap_args *bootstrap_args;
 };

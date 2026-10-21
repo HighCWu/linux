@@ -4395,7 +4395,7 @@ static inline void sigaltstack_lock(void) { }
 static inline void sigaltstack_unlock(void) { }
 #endif
 
-static int
+int
 do_sigaltstack (const stack_t *ss, stack_t *oss, unsigned long sp,
 		size_t min_ss_size)
 {

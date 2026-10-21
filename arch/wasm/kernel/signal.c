@@ -53,7 +53,7 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	 * just as a native signal frame would do for rt_sigreturn. */
 	sigset_t saved_mask = *sigmask_to_save();
 	struct wasm_signal_frame frame;
-	const struct wasm_signal_frame *previous_frame = ti->active_signal_frame;
+	struct wasm_signal_frame *previous_frame = ti->active_signal_frame;
 	const kernel_siginfo_t *previous_info = ti->active_siginfo;
 	unsigned long sp = 0, end;
 	u32 callback_flags = (sa->sa_flags & SA_SIGINFO) ? 1 : 0;
@@ -118,13 +118,16 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	*regs = saved_regs;
 	ti->active_signal_frame = previous_frame;
 	ti->active_siginfo = previous_info;
-	/* Like rt_sigreturn, normal callback completion restores the saved
+	/* Like rt_sigreturn, normal callback completion restores the saved/edited
 	 * registration, including one temporarily disabled by SS_AUTODISARM.
 	 * A SjLj exit skips this restoration and keeps the disarmed state. */
-	current->sas_ss_sp = (unsigned long)frame.stack.ss_sp;
-	current->sas_ss_size = frame.stack.ss_size;
-	current->sas_ss_flags = frame.stack.ss_flags;
-	set_current_blocked(&saved_mask);
+	/* As restore_altstack() does, ignore invalid settings from a signal
+	 * context while retaining the generic on-stack and size checks. Use the
+	 * delivery SP: a non-autodisarmed active stack remains protected until
+	 * the callback has returned to the interrupted C frame. */
+	(void)do_sigaltstack(&frame.stack, NULL, sp, MINSIGSTKSZ);
+	sigdelsetmask(&frame.mask, sigmask(SIGKILL) | sigmask(SIGSTOP));
+	set_current_blocked(&frame.mask);
 	if (failed)
 		force_sigsegv(ksig->sig);
 }
@@ -153,6 +156,24 @@ wasm_copy_active_signal_frame(stack_t __user *stack, sigset_t __user *mask)
 		return -EINVAL;
 	return copy_to_user(stack, &frame->stack, sizeof(frame->stack)) ||
 	       copy_to_user(mask, &frame->mask, sizeof(frame->mask)) ? -EFAULT : 0;
+}
+
+__attribute__((export_name("finish_signal_frame"))) int
+wasm_finish_active_signal_frame(const stack_t __user *stack,
+			       const sigset_t __user *mask)
+{
+	struct wasm_signal_frame *frame = current_thread_info()->active_signal_frame;
+	stack_t updated_stack;
+	sigset_t updated_mask;
+
+	if (!frame)
+		return -EINVAL;
+	if (copy_from_user(&updated_stack, stack, sizeof(updated_stack)) ||
+	    copy_from_user(&updated_mask, mask, sizeof(updated_mask)))
+		return -EFAULT;
+	frame->stack = updated_stack;
+	frame->mask = updated_mask;
+	return 0;
 }
 
 void arch_do_signal_or_restart(struct pt_regs *regs)

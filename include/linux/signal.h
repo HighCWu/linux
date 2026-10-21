@@ -455,6 +455,8 @@ extern bool unhandled_signal(struct task_struct *tsk, int sig);
 void signals_init(void);
 
 int restore_altstack(const stack_t __user *);
+/* Kernel-buffer variant for architectures with callback signal frames. */
+int do_sigaltstack(const stack_t *, stack_t *, unsigned long, size_t);
 int __save_altstack(stack_t __user *, unsigned long);
 
 #define unsafe_save_altstack(uss, sp, label) do { \
