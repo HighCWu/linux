@@ -13,6 +13,7 @@ struct task_bootstrap_args {
 	struct task_struct *task;
 	int (*fn)(void *);
 	void *fn_arg;
+	atomic_t aborted;
 };
 
 int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
@@ -21,7 +22,40 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 	atomic_set(&task_thread_info(dst)->running_cpu, WASM_CPU_PARKED);
 	task_thread_info(dst)->context_mm = NULL;
 	task_thread_info(dst)->active_siginfo = NULL;
+	task_thread_info(dst)->bootstrap_args = NULL;
 	return 0;
+}
+
+/* An unpublished task may fail after copy_thread() has created its Worker.
+ * Do not free its task, stack or bootstrap arguments while that Worker can
+ * still read them. The final release store is its last shared-memory access;
+ * the imported halt throws out of Wasm without returning to this stack. */
+static __noreturn void abort_task_entry(struct task_bootstrap_args *args)
+{
+	atomic_set_release(&args->aborted, 1);
+	wasm_kernel_halt_worker();
+	__builtin_unreachable();
+}
+
+void exit_thread(struct task_struct *p)
+{
+	struct thread_info *info = task_thread_info(p);
+	struct task_bootstrap_args *args = info->bootstrap_args;
+
+	if (!args)
+		return;
+	/* This Worker has never been made runnable. Changing the waited value,
+	 * rather than only notifying, also covers abort-before-wait races. */
+	BUG_ON(atomic_xchg(&info->running_cpu, WASM_CPU_FORK_ABORT) !=
+	       WASM_CPU_PARKED);
+	__builtin_wasm_memory_atomic_notify(&info->running_cpu.counter, 1);
+	while (!atomic_read_acquire(&args->aborted))
+		/* No notify after the final acknowledgement: it could touch memory
+		 * already freed by this parent. A bounded wait observes the store. */
+		__builtin_wasm_memory_atomic_wait32(&args->aborted.counter, 0,
+						  1000 * 1000);
+	info->bootstrap_args = NULL;
+	kfree(args);
 }
 
 struct task_struct *__switch_to(struct task_struct *from,
@@ -121,6 +155,8 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 		cpu = atomic_read(&info->running_cpu);
 		if (cpu >= 0)
 			break;
+		if (cpu == WASM_CPU_FORK_ABORT)
+			abort_task_entry(args);
 		if (cpu == WASM_CPU_REMOTE_WAKE) {
 			if (atomic_cmpxchg(&info->running_cpu,
 					   WASM_CPU_REMOTE_WAKE,
@@ -147,6 +183,7 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	set_current_task(task);
 	wasm_service_remote_request(task);
 
+	info->bootstrap_args = NULL;
 	kfree(args);
 
 	// early_printk(
@@ -219,6 +256,8 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	bootstrap_args->fn = args->fn;
 	bootstrap_args->fn_arg = args->fn_arg;
 	bootstrap_args->task = p;
+	atomic_set(&bootstrap_args->aborted, 0);
+	task_thread_info(p)->bootstrap_args = bootstrap_args;
 
 	name_len = snprintf(name, ARRAY_SIZE(name), "%s (%d)", p->comm, p->pid);
 
@@ -231,6 +270,7 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	ret = wasm_kernel_spawn_worker(&task_entry, bootstrap_args, name,
 				       name_len, user_memory);
 	if (ret) {
+		task_thread_info(p)->bootstrap_args = NULL;
 		kfree(bootstrap_args);
 		return ret;
 	}

@@ -6,6 +6,7 @@
 
 struct kernel_siginfo;
 struct mm_struct;
+struct task_bootstrap_args;
 
 /*
  * A remote wake changes the value parked workers wait on, so publishing a
@@ -13,6 +14,7 @@ struct mm_struct;
  */
 #define WASM_CPU_PARKED		(-1)
 #define WASM_CPU_REMOTE_WAKE	(-2)
+#define WASM_CPU_FORK_ABORT	(-3)
 
 /* THREAD_SIZE is the size of the task_struct + kernel stack
  * This is asserted in setup, but the stack should be 1 page,
@@ -31,6 +33,8 @@ struct thread_info {
 	struct mm_struct *context_mm;
 	unsigned long tp_value;
 	const struct kernel_siginfo *active_siginfo;
+	/* Non-NULL only until a newly-created Worker starts or is aborted. */
+	struct task_bootstrap_args *bootstrap_args;
 };
 
 #ifndef current_thread_info
@@ -47,6 +51,7 @@ struct thread_info {
 		.context_mm = NULL,                  \
 		.tp_value = ~0UL,                    \
 		.active_siginfo = NULL,              \
+		.bootstrap_args = NULL,              \
 	}
 
 #include <asm-generic/thread_info_tif.h>
