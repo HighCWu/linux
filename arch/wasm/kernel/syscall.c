@@ -121,14 +121,18 @@ SYSCALL_DEFINE1(set_thread_area, unsigned long, addr)
 SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot,
 		unsigned long, flags, long, fd, unsigned long, pgoff)
 {
+	/* Resident private backing satisfies population hints. Stack and the
+	 * historical executable/deny-write hints do not grant page permissions. */
+	const unsigned long advisory_flags = MAP_NORESERVE | MAP_POPULATE |
+		MAP_NONBLOCK | MAP_STACK | MAP_DENYWRITE | MAP_EXECUTABLE;
 	const unsigned long supported_flags = MAP_PRIVATE | MAP_ANONYMOUS |
-		MAP_FIXED | MAP_FIXED_NOREPLACE;
+		MAP_FIXED | MAP_FIXED_NOREPLACE | advisory_flags;
 
 #ifdef CONFIG_WASM_FILE_MMAP
 	if (!(flags & MAP_ANONYMOUS))
 		return wasm_mmap_file(addr, len, prot, flags, fd, pgoff);
 #endif
-	if (!len || pgoff || fd != -1 || (flags & MAP_TYPE) != MAP_PRIVATE ||
+	if (!len || pgoff || (flags & MAP_TYPE) != MAP_PRIVATE ||
 	    !(flags & MAP_ANONYMOUS))
 		return -EINVAL;
 	if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && !addr)
@@ -144,8 +148,10 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 		return -ENOMEM;
 	if ((flags & MAP_FIXED) && !(flags & MAP_FIXED_NOREPLACE))
 		return wasm_user_v2_mmap_fixed(addr, ALIGN(len, PAGE_SIZE));
-	/* NOREPLACE takes priority even when the caller also supplies FIXED. */
-	flags &= ~MAP_FIXED;
+	/* NOREPLACE takes priority even when the caller also supplies FIXED.
+	 * Normalize advisory bits and the ignored anonymous fd for old allocators. */
+	flags &= ~(MAP_FIXED | advisory_flags);
+	fd = -1;
 
 	return wasm_user_v2_mmap(addr, ALIGN(len, PAGE_SIZE), prot, flags, fd,
 				 pgoff);
