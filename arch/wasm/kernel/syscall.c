@@ -153,7 +153,10 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 		return -ENOMEM;
 	if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && !PAGE_ALIGNED(addr))
 		return -EINVAL;
-	if ((flags & ~supported_flags) || prot != (PROT_READ | PROT_WRITE))
+	/* Like NOMMU private copies, a read-only request does not imply enforced
+	 * write protection. Never pretend to supply guard pages or code loading. */
+	if ((flags & ~supported_flags) ||
+	    (prot != PROT_READ && prot != (PROT_READ | PROT_WRITE)))
 		return -EINVAL;
 	if (len > ULONG_MAX - (PAGE_SIZE - 1))
 		return -ENOMEM;
