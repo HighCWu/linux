@@ -1,6 +1,7 @@
 #include "asm/wasm_imports.h"
 #include <linux/printk.h>
 #include <linux/sched.h>
+#include <linux/pid.h>
 
 void show_stack(struct task_struct *task, unsigned long *sp, const char *loglvl)
 {
