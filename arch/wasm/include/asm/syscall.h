@@ -19,6 +19,12 @@ static inline int syscall_get_arch(struct task_struct *task)
 	return 0;
 }
 
+static inline void syscall_set_nr(struct task_struct *task,
+				  struct pt_regs *regs, int nr)
+{
+	regs->syscall_nr = nr;
+}
+
 static inline bool arch_syscall_is_vdso_sigreturn(struct pt_regs *regs)
 {
 	// TODO
@@ -36,6 +42,13 @@ static inline long syscall_get_return_value(struct task_struct *task,
 					    struct pt_regs *regs)
 {
 	return regs->syscall_return;
+}
+
+static inline void syscall_set_arguments(struct task_struct *task,
+					 struct pt_regs *regs,
+					 const unsigned long *args)
+{
+	memcpy(regs->syscall_args, args, sizeof(regs->syscall_args));
 }
 
 static inline long syscall_get_error(struct task_struct *task,

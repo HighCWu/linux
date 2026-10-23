@@ -84,6 +84,8 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 		regs->user_mode = 0;
 		/* Generic ptrace entry work reads the current syscall number. */
 		regs->syscall_nr = nr;
+		/* Entry tracing may skip execution and supply its own result. */
+		regs->syscall_return = -ENOSYS;
 		nr = syscall_enter_from_user_mode(regs, nr);
 		regs->syscall_nr = nr;
 		regs->restart_syscall_nr = -1;
@@ -98,9 +100,9 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 
 		if (nr == __NR_sigaltstack && sp_error)
 			regs->syscall_return = sp_error;
-		else if (nr < 0 || nr >= ARRAY_SIZE(syscall_table))
+		else if (nr != -1 && (nr < 0 || nr >= ARRAY_SIZE(syscall_table)))
 			regs->syscall_return = -ENOSYS;
-		else {
+		else if (nr >= 0) {
 			struct pt_regs entered = *regs;
 			long result;
 

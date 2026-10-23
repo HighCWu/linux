@@ -22,6 +22,7 @@ config WASM
 	select OF_IRQ
 	select HAVE_PAGE_SIZE_64KB
 	select HAVE_EXIT_THREAD
+	select HAVE_ARCH_SYSCALL_INFO
 	select SMP
 	select THREAD_INFO_IN_TASK
 

@@ -924,6 +924,9 @@ static int ptrace_regset(struct task_struct *task, int req, unsigned int type,
  * to ensure no machine forgets it.
  */
 EXPORT_SYMBOL_GPL(task_user_regset_view);
+#endif /* CONFIG_HAVE_ARCH_TRACEHOOK */
+
+#ifdef CONFIG_HAVE_ARCH_SYSCALL_INFO
 
 static unsigned long
 ptrace_get_syscall_info_entry(struct task_struct *child, struct pt_regs *regs,
@@ -1142,7 +1145,7 @@ ptrace_set_syscall_info(struct task_struct *child, unsigned long user_size,
 		return -EINVAL;
 	}
 }
-#endif /* CONFIG_HAVE_ARCH_TRACEHOOK */
+#endif /* CONFIG_HAVE_ARCH_SYSCALL_INFO */
 
 int ptrace_request(struct task_struct *child, long request,
 		   unsigned long addr, unsigned long data)
@@ -1356,7 +1359,9 @@ int ptrace_request(struct task_struct *child, long request,
 			ret = __put_user(kiov.iov_len, &uiov->iov_len);
 		break;
 	}
+#endif /* CONFIG_HAVE_ARCH_TRACEHOOK */
 
+#ifdef CONFIG_HAVE_ARCH_SYSCALL_INFO
 	case PTRACE_GET_SYSCALL_INFO:
 		ret = ptrace_get_syscall_info(child, addr, datavp);
 		break;

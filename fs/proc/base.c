@@ -668,7 +668,7 @@ static int proc_pid_limits(struct seq_file *m, struct pid_namespace *ns,
 	return 0;
 }
 
-#ifdef CONFIG_HAVE_ARCH_TRACEHOOK
+#ifdef CONFIG_HAVE_ARCH_SYSCALL_INFO
 static int proc_pid_syscall(struct seq_file *m, struct pid_namespace *ns,
 			    struct pid *pid, struct task_struct *task)
 {
@@ -695,7 +695,7 @@ static int proc_pid_syscall(struct seq_file *m, struct pid_namespace *ns,
 
 	return 0;
 }
-#endif /* CONFIG_HAVE_ARCH_TRACEHOOK */
+#endif /* CONFIG_HAVE_ARCH_SYSCALL_INFO */
 
 /************************************************************************/
 /*                       Here the fs part begins                        */
@@ -3309,7 +3309,7 @@ static const struct pid_entry tgid_base_stuff[] = {
 	REG("timens_offsets",  S_IRUGO|S_IWUSR, proc_timens_offsets_operations),
 #endif
 	REG("comm",      S_IRUGO|S_IWUSR, proc_pid_set_comm_operations),
-#ifdef CONFIG_HAVE_ARCH_TRACEHOOK
+#ifdef CONFIG_HAVE_ARCH_SYSCALL_INFO
 	ONE("syscall",    S_IRUSR, proc_pid_syscall),
 #endif
 	REG("cmdline",    S_IRUGO, proc_pid_cmdline_ops),
@@ -3651,7 +3651,7 @@ static const struct pid_entry tid_base_stuff[] = {
 	NOD("comm",      S_IFREG|S_IRUGO|S_IWUSR,
 			 &proc_tid_comm_inode_operations,
 			 &proc_pid_set_comm_operations, {}),
-#ifdef CONFIG_HAVE_ARCH_TRACEHOOK
+#ifdef CONFIG_HAVE_ARCH_SYSCALL_INFO
 	ONE("syscall",   S_IRUSR, proc_pid_syscall),
 #endif
 	REG("cmdline",   S_IRUGO, proc_pid_cmdline_ops),
