@@ -193,10 +193,14 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 	if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && !PAGE_ALIGNED(addr))
 		return -EINVAL;
 	/* Like NOMMU private copies, a read-only request does not imply enforced
-	 * write protection. Never pretend to supply guard pages or code loading. */
+	 * write protection. WRITE implies READ in direct linear memory. Never
+	 * pretend to supply guard pages, read isolation or code loading. */
 	if ((flags & ~supported_flags) ||
-	    (prot != PROT_READ && prot != (PROT_READ | PROT_WRITE)))
+	    !prot || (prot & ~(PROT_READ | PROT_WRITE)))
 		return -EINVAL;
+	/* Older execution allocators admit READ or READ|WRITE only. */
+	if (prot & PROT_WRITE)
+		prot |= PROT_READ;
 	if (len > ULONG_MAX - (PAGE_SIZE - 1))
 		return -ENOMEM;
 	if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) &&
