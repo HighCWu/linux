@@ -15,6 +15,7 @@
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 
+#ifdef CONFIG_MMU
 /**
  * process_vm_rw_pages - read/write pages from task specified
  * @pages: array of pointers to pages we want to copy
@@ -131,6 +132,66 @@ static int process_vm_rw_single_vec(unsigned long addr,
 	return rc;
 }
 
+#else /* CONFIG_MMU */
+
+/*
+ * Wasm's NOMMU user addresses are offsets in a process-local linear memory,
+ * not kernel pages. access_remote_vm() already delegates a foreign mm to a
+ * worker owning that memory. Never pin or dereference those offsets here.
+ * A bounded bounce buffer also keeps local user access outside the remote
+ * mailbox, so no local buffer or iov_iter is published to another worker.
+ */
+#define PVM_NOMMU_BUFFER_SIZE 4096
+
+static int process_vm_rw_single_vec(unsigned long addr,
+				    unsigned long len,
+				    struct iov_iter *iter,
+				    struct page **process_pages,
+				    struct mm_struct *mm,
+				    struct task_struct *task,
+				    int vm_write)
+{
+	void *buffer;
+	int rc = 0;
+
+	if (!len || !iov_iter_count(iter))
+		return 0;
+	buffer = kmalloc(PVM_NOMMU_BUFFER_SIZE, GFP_KERNEL);
+	if (!buffer)
+		return -ENOMEM;
+
+	while (len && iov_iter_count(iter)) {
+		size_t bytes = min_t(size_t, len, iov_iter_count(iter));
+		size_t copied;
+		int remote;
+
+		bytes = min_t(size_t, bytes, PVM_NOMMU_BUFFER_SIZE);
+		bytes = min_t(size_t, bytes, PAGE_SIZE - offset_in_page(addr));
+		if (vm_write) {
+			copied = copy_from_iter(buffer, bytes, iter);
+			remote = copied ? access_remote_vm(mm, addr, buffer,
+							   copied, FOLL_WRITE) : 0;
+			/* Only bytes actually committed to the target count as
+			 * transferred, even after a local partial copy. */
+			iov_iter_revert(iter, copied - remote);
+			copied = remote;
+		} else {
+			remote = access_remote_vm(mm, addr, buffer, bytes, 0);
+			copied = copy_to_iter(buffer, remote, iter);
+		}
+		if (copied != bytes) {
+			rc = -EFAULT;
+			break;
+		}
+		addr += copied;
+		len -= copied;
+	}
+	kfree(buffer);
+	return rc;
+}
+
+#endif /* CONFIG_MMU */
+
 /* Maximum number of entries for process pages array
    which lives on stack */
 #define PVM_MAX_PP_ARRAY_COUNT 16
@@ -159,11 +220,21 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 	struct mm_struct *mm;
 	unsigned long i;
 	ssize_t rc = 0;
+#ifdef CONFIG_MMU
 	unsigned long nr_pages = 0;
 	unsigned long nr_pages_iov;
 	ssize_t iov_len;
+#endif
 	size_t total_len = iov_iter_count(iter);
 
+	/* Preserve the no-transfer fast path without looking up a remote task. */
+	for (i = 0; i < riovcnt; i++)
+		if (rvec[i].iov_len)
+			break;
+	if (i == riovcnt)
+		return 0;
+
+#ifdef CONFIG_MMU
 	/*
 	 * Work out how many pages of struct pages we're going to need
 	 * when eventually calling get_user_pages
@@ -192,6 +263,7 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 		if (!process_pages)
 			return -ENOMEM;
 	}
+#endif
 
 	/* Get process information */
 	task = find_get_task_by_vpid(pid);

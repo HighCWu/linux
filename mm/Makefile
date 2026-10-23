@@ -40,10 +40,6 @@ mmu-$(CONFIG_MMU)	:= highmem.o memory.o mincore.o \
 			   pgtable-generic.o rmap.o vmalloc.o vma.o vma_exec.o
 
 
-ifdef CONFIG_CROSS_MEMORY_ATTACH
-mmu-$(CONFIG_MMU)	+= process_vm_access.o
-endif
-
 ifdef CONFIG_64BIT
 mmu-$(CONFIG_MMU)	+= mseal.o
 endif
@@ -67,6 +63,7 @@ memory-hotplug-$(CONFIG_MEMORY_HOTPLUG) += memory_hotplug.o
 obj-y += page-alloc.o
 obj-y += page_frag_cache.o
 obj-y += init-mm.o
+obj-$(CONFIG_CROSS_MEMORY_ATTACH) += process_vm_access.o
 obj-y += memblock.o
 obj-y += $(memory-hotplug-y)
 obj-y += slub.o

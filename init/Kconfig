@@ -525,7 +525,7 @@ config WATCH_QUEUE
 
 config CROSS_MEMORY_ATTACH
 	bool "Enable process_vm_readv/writev syscalls"
-	depends on MMU
+	depends on MMU || WASM
 	default y
 	help
 	  Enabling this option adds the system calls process_vm_readv and
