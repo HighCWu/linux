@@ -205,7 +205,7 @@ SYSCALL_DEFINE4(wasm_mmap_file_read_test, int, fd, unsigned long, length,
 	result = -EBADF;
 	if (!(file->f_mode & FMODE_READ))
 		goto put;
-	result = wasm_mmap_copy_file(file, length, offset, size);
+	return wasm_mmap_copy_file(file, length, offset, size);
 put:
 	fput(file);
 	return result;

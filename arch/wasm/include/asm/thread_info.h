@@ -8,6 +8,7 @@ struct kernel_siginfo;
 struct mm_struct;
 struct task_bootstrap_args;
 struct wasm_signal_frame;
+struct wasm_mmap_callback;
 
 /*
  * A remote wake changes the value parked workers wait on, so publishing a
@@ -37,6 +38,8 @@ struct thread_info {
 	struct wasm_signal_frame *active_signal_frame;
 	/* Non-NULL only until a newly-created Worker starts or is aborted. */
 	struct task_bootstrap_args *bootstrap_args;
+	/* Quiescent file copies only, never an in-flight VFS producer. */
+	struct wasm_mmap_callback *mmap_callbacks;
 };
 
 #ifndef current_thread_info
@@ -55,6 +58,7 @@ struct thread_info {
 		.active_siginfo = NULL,              \
 		.active_signal_frame = NULL,         \
 		.bootstrap_args = NULL,              \
+		.mmap_callbacks = NULL,               \
 	}
 
 #include <asm-generic/thread_info_tif.h>

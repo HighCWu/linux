@@ -1,6 +1,7 @@
 #include <asm/delay.h>
 #include <asm/globals.h>
 #include <asm/remote_vm.h>
+#include <asm/mmap_file.h>
 #include <asm/sysmem.h>
 #include <asm/wasm_imports.h>
 #include <linux/entry-common.h>
@@ -24,6 +25,7 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 	task_thread_info(dst)->active_siginfo = NULL;
 	task_thread_info(dst)->active_signal_frame = NULL;
 	task_thread_info(dst)->bootstrap_args = NULL;
+	task_thread_info(dst)->mmap_callbacks = NULL;
 	return 0;
 }
 
@@ -50,6 +52,7 @@ void exit_thread(struct task_struct *p)
 	struct thread_info *info = task_thread_info(p);
 	struct task_bootstrap_args *args = info->bootstrap_args;
 
+	wasm_mmap_copy_abort_task(p);
 	if (!args)
 		return;
 	/* This Worker has never been made runnable. Changing the waited value,

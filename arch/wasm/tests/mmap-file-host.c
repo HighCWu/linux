@@ -65,6 +65,15 @@ int main(void)
 	fail_allocation = 1;
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -ENOMEM);
 	fail_allocation = 0;
+	/* The post-read callback ownership record can fail independently. */
+	fail_allocation = 2;
+	read_mode = 0;
+	read_total = 0;
+	int copies_before_record_failure = copies;
+	assert(wasm_mmap_file(0, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, 0) == -ENOMEM);
+	assert(copies == copies_before_record_failure);
+	clean();
+	fail_allocation = 0;
 	for (int mode = 0; mode <= 3; mode++) {
 		read_mode = mode;
 		read_total = 0;

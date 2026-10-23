@@ -12,11 +12,60 @@
 #include <asm/mmap_file.h>
 #include <asm/virtio_snapshot.h>
 #include <asm/wasm_imports.h>
+#include <asm/thread_info.h>
 
 #define COPY_BUDGET (8 * PAGE_SIZE)
 static atomic_t copy_reserved = ATOMIC_INIT(0);
 static atomic_t copy_requests = ATOMIC_INIT(0);
 static atomic_t copy_staging = ATOMIC_INIT(0);
+
+/* Heap-owned because a user SjLj/trap can discard the original C frame.
+ * Only publish after kernel_read has returned: exit must never free a
+ * buffer still owned by an asynchronous producer. Each task owns its list. */
+struct wasm_mmap_callback {
+	struct wasm_mmap_callback *next;
+	struct file *file;
+	void *staging;
+	unsigned long rounded;
+};
+
+static void release_callback(struct wasm_mmap_callback *callback)
+{
+	kfree(callback->staging);
+	atomic_dec(&copy_staging);
+	atomic_sub(2 * callback->rounded, &copy_reserved);
+	atomic_dec(&copy_requests);
+	fput(callback->file);
+	kfree(callback);
+}
+
+void wasm_mmap_copy_abort_task(struct task_struct *task)
+{
+	struct thread_info *info = task_thread_info(task);
+	struct wasm_mmap_callback *callback;
+
+	while ((callback = info->mmap_callbacks)) {
+		info->mmap_callbacks = callback->next;
+		release_callback(callback);
+	}
+}
+
+/* Internal execution export, never a Linux syscall or user module import.
+ * Called before the bridge rethrows a callback exception, while this task
+ * still owns its CPU. A callback's exit instead cleans in exit_thread(). */
+#ifdef __wasm__
+__attribute__((export_name("abort_file_mmap_v1")))
+#endif
+void wasm_abort_file_mmap_v1(void)
+{
+	struct thread_info *info = task_thread_info(current);
+	struct wasm_mmap_callback *callback = info->mmap_callbacks;
+
+	if (callback) {
+		info->mmap_callbacks = callback->next;
+		release_callback(callback);
+	}
+}
 #ifdef CONFIG_WASM_MMAP_COPY_TEST
 static atomic_t copy_callback_attempts = ATOMIC_INIT(0);
 #endif
@@ -60,7 +109,7 @@ bool wasm_mmap_snapshot_source(struct file *file)
 		wasm_bdev_has_snapshot_source(sb->s_bdev);
 }
 
-/* Caller pins file and authenticates a stable size/source. No userspace or
+/* Consumes the caller's file reference and uses its authenticated size/source. No userspace or
  * host-selected pathname is read. kernel_read owns its producer until return;
  * the synchronous initialized-copy bridge never publishes partial data. */
 long wasm_mmap_copy_file(struct file *file, unsigned long length,
@@ -70,11 +119,13 @@ long wasm_mmap_copy_file(struct file *file, unsigned long length,
 	loff_t position;
 	size_t count, done = 0;
 	u8 *staging;
+	struct wasm_mmap_callback *callback;
+	struct thread_info *info;
 	long result = -EINVAL;
 
 	if (!length || length > 2 * PAGE_SIZE || offset > LLONG_MAX ||
 	    !PAGE_ALIGNED(offset))
-		return -EINVAL;
+		goto put;
 	rounded = ALIGN(length, PAGE_SIZE);
 	atomic_inc(&copy_requests);
 	/* Permit a final partial page, never a page wholly beyond EOF. */
@@ -111,10 +162,24 @@ long wasm_mmap_copy_file(struct file *file, unsigned long length,
 		result = -EINTR;
 		goto free;
 	}
+	callback = kmalloc(sizeof(*callback), GFP_KERNEL);
+	if (!callback) {
+		result = -ENOMEM;
+		goto free;
+	}
+	info = task_thread_info(current);
+	callback->file = file;
+	callback->staging = staging;
+	callback->rounded = rounded;
+	callback->next = info->mmap_callbacks;
+	info->mmap_callbacks = callback;
 #ifdef CONFIG_WASM_MMAP_COPY_TEST
 	atomic_inc(&copy_callback_attempts);
 #endif
 	result = wasm_user_mmap_init_v1_map(rounded, staging, count);
+	info->mmap_callbacks = callback->next;
+	release_callback(callback);
+	return result;
 free:
 	kfree(staging);
 	atomic_dec(&copy_staging);
@@ -122,6 +187,8 @@ unreserve:
 	atomic_sub(2 * rounded, &copy_reserved);
 out:
 	atomic_dec(&copy_requests);
+put:
+	fput(file);
 	return result;
 }
 
@@ -171,8 +238,8 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 	result = security_mmap_file(file, prot, flags);
 	if (result)
 		goto put;
-	result = wasm_mmap_copy_file(file, length, offset,
-				     i_size_read(file_inode(file)));
+	return wasm_mmap_copy_file(file, length, offset,
+				   i_size_read(file_inode(file)));
 put:
 	fput(file);
 	return result;

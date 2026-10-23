@@ -42,7 +42,12 @@ static int read_mode, fail_allocation, security_error, copy_error;
 static size_t read_total, last_length, last_rounded;
 static u64 first_offset;
 static bool fatal_pending, fatal_after_read;
-#define current NULL
+struct wasm_mmap_callback;
+struct thread_info { struct wasm_mmap_callback *mmap_callbacks; };
+struct task_struct { struct thread_info info; };
+static struct task_struct task;
+#define current (&task)
+#define task_thread_info(t) (&(t)->info)
 static bool fatal_signal_pending(void *task) { (void)task; return fatal_pending; }
 
 static struct inode *file_inode(struct file *f) { return f->inode; }
@@ -63,13 +68,13 @@ static int security_mmap_file(struct file *f, unsigned long prot, unsigned long 
 static void *kmalloc(size_t length, int flags) {
 	(void)flags;
 	allocation_attempts++;
-	if (fail_allocation) return NULL;
+	if (fail_allocation == 1 || (fail_allocation == 2 && length < 256)) return NULL;
 	void *buffer = malloc(length);
 	assert(buffer);
 	allocations++;
 	return buffer;
 }
-static void kfree(void *buffer) { assert(allocations == 1); allocations--; free(buffer); }
+static void kfree(void *buffer) { assert(allocations > 0); allocations--; free(buffer); }
 static ssize_t kernel_read(struct file *f, void *buffer, size_t length, loff_t *position) {
 	assert(f == &file && pins == 1 && length > 0);
 	reads++;
@@ -84,7 +89,7 @@ static ssize_t kernel_read(struct file *f, void *buffer, size_t length, loff_t *
 	return length;
 }
 static long wasm_user_mmap_init_v1_map(unsigned long rounded, const void *source, unsigned long length) {
-	assert(pins == 1 && allocations == 1 && length <= rounded);
+	assert(pins == 1 && allocations == 2 && length <= rounded);
 	for (size_t i = 0; i < length; i++) assert(((const u8 *)source)[i] == (u8)((first_offset + i) * 37 + 11));
 	copies++;
 	last_length = length;
