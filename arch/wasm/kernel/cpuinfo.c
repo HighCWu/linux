@@ -1,18 +1,16 @@
 #include <linux/seq_file.h>
 
-static void percpu_print(void *arg)
-{
-	struct seq_file *m = arg;
-	seq_printf(m, "processor       : %d\n", smp_processor_id());
-	seq_printf(m, "\n");
-}
-
 static int c_show(struct seq_file *m, void *v)
 {
 	int cpu;
 
-	for_each_online_cpu(cpu)
-		smp_call_function_single(cpu, percpu_print, m, true);
+	/* No CPU-local state is read here. In particular, do not wait for an
+	 * IPI callback: a Wasm CPU executing userspace without a kernel entry
+	 * cannot service it, and reading proc must not stop that computation. */
+	for_each_online_cpu(cpu) {
+		seq_printf(m, "processor       : %d\n", cpu);
+		seq_printf(m, "\n");
+	}
 
 	return 0;
 }
