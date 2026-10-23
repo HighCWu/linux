@@ -91,5 +91,25 @@ int main(void)
 	assert(reads == old_reads && wasm_mmap_copy_stat(3) == COPY_BUDGET);
 	atomic_sub(COPY_BUDGET, &copy_reserved);
 	clean();
+	/* A visible fatal signal is not permission to release a still-running
+	 * producer. The model injects it only before/after synchronous read. */
+	for (int phase = 0; phase < 3; phase++) {
+		read_mode = phase == 1 ? 1 : 0;
+		read_total = 0;
+		fatal_pending = phase == 0;
+		fatal_after_read = phase != 0;
+		int reads_before = reads, copies_before = copies;
+		assert(wasm_mmap_file(0, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, 0) == -EINTR);
+		assert(copies == copies_before && reads == reads_before + (phase != 0));
+		clean();
+		fatal_pending = fatal_after_read = false;
+	}
+	read_mode = 0;
+	read_total = 0;
+	assert(wasm_mmap_file(0, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, 0) == 65536);
+	clean();
+#ifdef CONFIG_WASM_MMAP_COPY_TEST
+	assert(wasm_mmap_copy_stat(0x100) == copies);
+#endif
 	return 0;
 }

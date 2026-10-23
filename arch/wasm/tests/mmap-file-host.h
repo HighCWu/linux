@@ -41,6 +41,9 @@ static int allocation_attempts;
 static int read_mode, fail_allocation, security_error, copy_error;
 static size_t read_total, last_length, last_rounded;
 static u64 first_offset;
+static bool fatal_pending, fatal_after_read;
+#define current NULL
+static bool fatal_signal_pending(void *task) { (void)task; return fatal_pending; }
 
 static struct inode *file_inode(struct file *f) { return f->inode; }
 static loff_t i_size_read(struct inode *node) { return node->size; }
@@ -77,6 +80,7 @@ static ssize_t kernel_read(struct file *f, void *buffer, size_t length, loff_t *
 	for (size_t i = 0; i < length; i++) ((u8 *)buffer)[i] = (u8)((*position + i) * 37 + 11);
 	*position += length;
 	read_total += length;
+	if (fatal_after_read) fatal_pending = true;
 	return length;
 }
 static long wasm_user_mmap_init_v1_map(unsigned long rounded, const void *source, unsigned long length) {

@@ -4,6 +4,7 @@
 import os
 from pathlib import Path
 import re
+import resource
 import subprocess
 import tempfile
 
@@ -16,14 +17,32 @@ source = re.sub(r"^#include[^\n]*\n", "", source, flags=re.M)
 shim = (root / "mmap-file-host.h").read_text()
 checks = (root / "mmap-file-host.c").read_text()
 compiler = os.environ.get("CC", "cc")
+def no_core():
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
 with tempfile.TemporaryDirectory(prefix="wasm-file-mmap-host-") as directory:
     for bits in (32, 64):
         output = str(Path(directory) / f"checks-{bits}")
+        command = [compiler, "-xc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
+                   "-Wno-sign-compare", "-DCONFIG_WASM_FILE_MMAP=1",
+                   "-DCONFIG_WASM_MMAP_COPY_TEST=1",
+                   *(["-DCONFIG_32BIT=1"] if bits == 32 else []), "-o", output, "-"]
         subprocess.run(
-            [compiler, "-xc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
-             "-Wno-sign-compare", "-DCONFIG_WASM_FILE_MMAP=1",
-             *(["-DCONFIG_32BIT=1"] if bits == 32 else []), "-o", output, "-"],
+            command,
             input=shim + "\n" + source + "\n" + checks, text=True, check=True,
         )
         subprocess.run([output], check=True, timeout=15)
+        # Bypass only fatal admission; retain references so this compiles
+        # under the same warnings as the positive kernel-function model.
+        guard = "fatal_signal_pending(current)"
+        assert source.count(guard) == 2
+        for index in (0, 1):
+            before, after = source.split(guard, 1) if index == 0 else source.rsplit(guard, 1)
+            negative = before + "(false && fatal_signal_pending(current))" + after
+            subprocess.run(command, input=shim + "\n" + negative + "\n" + checks,
+                           text=True, check=True)
+            result = subprocess.run([output], capture_output=True, text=True,
+                                    preexec_fn=no_core, timeout=15)
+            expected = "reads == reads_before" if index == 0 else "-EINTR"
+            assert result.returncode != 0 and expected in result.stderr, result.stderr
         print(f"host shims: mmap{'2 units' if bits == 32 else ' bytes'} passed", flush=True)

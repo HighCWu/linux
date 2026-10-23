@@ -58,13 +58,20 @@ static ssize_t test_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 		return -EINVAL;
 	if (data->mode == 3)
 		return -EINTR;
-	if ((data->mode == 4 && !pos) || (data->mode == 5 && pos >= 7)) {
+	if (((data->mode == 4 || data->mode == 6) && !pos) ||
+	    (data->mode == 5 && pos >= 7)) {
 		int error;
 
 		complete_all(&data->entered);
-		error = wait_for_completion_interruptible(&data->proceed);
-		if (error)
-			return error;
+		if (data->mode == 6) {
+			/* Test a producer which must finish before a fatal reader
+			 * can release staging; SIGKILL cannot release this barrier. */
+			wait_for_completion(&data->proceed);
+		} else {
+			error = wait_for_completion_interruptible(&data->proceed);
+			if (error)
+				return error;
+		}
 		if (data->mode == 5)
 			return -EIO;
 	}
@@ -142,7 +149,7 @@ SYSCALL_DEFINE1(wasm_mmap_file_create_test, unsigned int, mode)
 	size_t i;
 	int fd;
 
-	if (mode > 5)
+	if (mode > 6)
 		return -EINVAL;
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0)

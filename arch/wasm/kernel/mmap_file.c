@@ -7,6 +7,7 @@
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/security.h>
+#include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <asm/mmap_file.h>
 #include <asm/virtio_snapshot.h>
@@ -16,6 +17,9 @@
 static atomic_t copy_reserved = ATOMIC_INIT(0);
 static atomic_t copy_requests = ATOMIC_INIT(0);
 static atomic_t copy_staging = ATOMIC_INIT(0);
+#ifdef CONFIG_WASM_MMAP_COPY_TEST
+static atomic_t copy_callback_attempts = ATOMIC_INIT(0);
+#endif
 
 static bool reserve_copy(unsigned long rounded)
 {
@@ -39,6 +43,10 @@ long wasm_mmap_copy_stat(unsigned int selector)
 		return atomic_read(&copy_staging);
 	case 3:
 		return atomic_read(&copy_reserved);
+#ifdef CONFIG_WASM_MMAP_COPY_TEST
+	case 0x100:
+		return atomic_read(&copy_callback_attempts);
+#endif
 	default:
 		return -EINVAL;
 	}
@@ -82,7 +90,13 @@ long wasm_mmap_copy_file(struct file *file, unsigned long length,
 	atomic_inc(&copy_staging);
 	position = offset;
 	while (done < count) {
-		ssize_t read = kernel_read(file, staging + done, count - done, &position);
+		ssize_t read;
+
+		if (fatal_signal_pending(current)) {
+			result = -EINTR;
+			goto free;
+		}
+		read = kernel_read(file, staging + done, count - done, &position);
 
 		if (read <= 0) {
 			result = read ? read : -EIO;
@@ -90,6 +104,16 @@ long wasm_mmap_copy_file(struct file *file, unsigned long length,
 		}
 		done += read;
 	}
+	/* kernel_read has returned, so no producer can still write staging.
+	 * A fatal signal observed here must not start a new user allocator
+	 * callback. Keep ownership until this point, then take ordinary cleanup. */
+	if (fatal_signal_pending(current)) {
+		result = -EINTR;
+		goto free;
+	}
+#ifdef CONFIG_WASM_MMAP_COPY_TEST
+	atomic_inc(&copy_callback_attempts);
+#endif
 	result = wasm_user_mmap_init_v1_map(rounded, staging, count);
 free:
 	kfree(staging);
