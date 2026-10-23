@@ -787,6 +787,12 @@ int fault_in_user_writeable(u32 __user *uaddr)
 	struct mm_struct *mm = current->mm;
 	int ret;
 
+	/* A Wasm uaccess failure describes an invalid process-linear offset,
+	 * not a missing kernel page-table entry. NOMMU fixup_user_fault()
+	 * would BUG instead of making that address accessible. */
+	if (IS_ENABLED(CONFIG_WASM))
+		return -EFAULT;
+
 	mmap_read_lock(mm);
 	ret = fixup_user_fault(mm, (unsigned long)uaddr,
 			       FAULT_FLAG_WRITE, NULL);
