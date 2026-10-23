@@ -53,6 +53,8 @@ void exit_thread(struct task_struct *p)
 	struct task_bootstrap_args *args = info->bootstrap_args;
 
 	wasm_mmap_copy_abort_task(p);
+	info->active_siginfo = NULL;
+	info->active_signal_frame = NULL;
 	if (!args)
 		return;
 	/* This Worker has never been made runnable. Changing the waited value,

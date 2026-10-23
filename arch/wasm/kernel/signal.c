@@ -10,6 +10,8 @@
 struct wasm_signal_frame {
 	stack_t stack;
 	sigset_t mask;
+	struct wasm_signal_frame *previous;
+	const kernel_siginfo_t *previous_info;
 };
 
 static void syscall_restart(struct pt_regs *regs, bool handler,
@@ -66,6 +68,8 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	frame.stack.ss_size = current->sas_ss_size;
 	frame.stack.ss_flags = current->sas_ss_flags;
 	frame.mask = saved_mask;
+	frame.previous = previous_frame;
+	frame.previous_info = previous_info;
 
 	/* Old modules may still receive ordinary callbacks without a C stack
 	 * export. A registered alternative stack, however, requires the v1 ABI. */
@@ -143,8 +147,14 @@ wasm_copy_active_siginfo(siginfo_t __user *to)
 __attribute__((export_name("clear_siginfo"))) void
 wasm_clear_active_siginfo(void)
 {
-	current_thread_info()->active_siginfo = NULL;
-	current_thread_info()->active_signal_frame = NULL;
+	struct thread_info *ti = current_thread_info();
+	struct wasm_signal_frame *frame = ti->active_signal_frame;
+
+	/* A SjLj may land inside an outer handler which is still live. Its
+	 * frame must remain available to the restorer, not be cleared with
+	 * the escaped inner frame. Each JS callback unwinds exactly one level. */
+	ti->active_siginfo = frame ? frame->previous_info : NULL;
+	ti->active_signal_frame = frame ? frame->previous : NULL;
 }
 
 __attribute__((export_name("copy_signal_frame"))) int
