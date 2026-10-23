@@ -158,14 +158,17 @@ static inline ktime_t timens_ktime_to_host(clockid_t clockid, ktime_t tim)
 }
 #endif
 
-#ifdef CONFIG_TIME_NS_VDSO
+#if defined(CONFIG_TIME_NS) || defined(CONFIG_TIME_NS_VDSO)
 extern void timens_commit(struct task_struct *tsk, struct time_namespace *ns);
-struct page *find_timens_vvar_page(struct vm_area_struct *vma);
-#else /* !CONFIG_TIME_NS_VDSO */
+#else
 static inline void timens_commit(struct task_struct *tsk, struct time_namespace *ns)
 {
 }
+#endif
 
+#ifdef CONFIG_TIME_NS_VDSO
+struct page *find_timens_vvar_page(struct vm_area_struct *vma);
+#else /* !CONFIG_TIME_NS_VDSO */
 static inline struct page *find_timens_vvar_page(struct vm_area_struct *vma)
 {
 	return NULL;

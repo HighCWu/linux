@@ -22,6 +22,15 @@
 
 #include "namespace_internal.h"
 
+#ifndef CONFIG_TIME_NS_VDSO
+void timens_commit(struct task_struct *tsk, struct time_namespace *ns)
+{
+	/* Syscall-only clocks need the same immutable offsets as the vDSO. */
+	guard(mutex)(&timens_offset_lock);
+	ns->frozen_offsets = true;
+}
+#endif
+
 ktime_t do_timens_ktime_to_host(clockid_t clockid, ktime_t tim,
 				struct timens_offsets *ns_offsets)
 {
