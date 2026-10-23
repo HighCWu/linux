@@ -151,9 +151,15 @@ int wasm_access_remote_vm(struct mm_struct *mm, unsigned long addr, void *buf,
 	u64 deadline;
 	int result = 0;
 
-	if (len <= 0)
+	if (len <= 0 || addr >= TASK_SIZE)
 		return 0;
-	len = min_t(int, len, PAGE_SIZE - offset_in_page(addr));
+	/* Bound the mailbox payload, not the address's offset in a Wasm page.
+	 * Adjacent linear-memory bytes need no separate page pin. In particular
+	 * ptrace PEEK/POKE must transfer an unaligned word across that boundary.
+	 * Preserve a valid prefix at the architecture's user-address limit.
+	 */
+	len = min_t(unsigned long, len, PAGE_SIZE);
+	len = min_t(unsigned long, len, TASK_SIZE - addr);
 	if (!access_ok((void __user *)addr, len))
 		return 0;
 
