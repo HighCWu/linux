@@ -54,6 +54,6 @@ struct thread_struct {};
 #define KSTK_ESP(tsk) (0)
 
 #define on_thread_stack() \
-	((unsigned long)(current->stack - get_stack_pointer()) < THREAD_SIZE)
+	((unsigned long)get_stack_pointer() - (unsigned long)current->stack < THREAD_SIZE)
 
 #endif
