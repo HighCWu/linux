@@ -10,18 +10,6 @@ struct task_struct;
 #define instruction_pointer(regs) (-1)
 #define user_stack_pointer(regs) ((regs)->user_sp)
 
-static inline long arch_ptrace(struct task_struct *child, long request,
-			       unsigned long addr, unsigned long data)
-{
-	BUG();
-	return -EINVAL;
-}
-
-static inline void ptrace_disable(struct task_struct *child)
-{
-	BUG();
-}
-
 static inline int regs_irqs_disabled(struct pt_regs *regs)
 {
 	BUG();

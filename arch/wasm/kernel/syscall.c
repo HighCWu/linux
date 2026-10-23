@@ -82,6 +82,8 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 		local_irq_disable();
 		rcu_note_context_switch(false);
 		regs->user_mode = 0;
+		/* Generic ptrace entry work reads the current syscall number. */
+		regs->syscall_nr = nr;
 		nr = syscall_enter_from_user_mode(regs, nr);
 		regs->syscall_nr = nr;
 		regs->restart_syscall_nr = -1;
