@@ -142,6 +142,14 @@ struct task_struct *__switch_to(struct task_struct *from,
 
 	// pr_info("woke up cpu=%i task=%p in switch\n", cpu, from);
 
+	/*
+	 * The generic NOMMU switch_mm() is empty. membarrier requires a full
+	 * barrier after the scheduler publishes rq->curr and before this task
+	 * returns to userspace, including a handoff between kernel instances.
+	 */
+	if (IS_ENABLED(CONFIG_MEMBARRIER))
+		smp_mb();
+
 	return prev;
 }
 
