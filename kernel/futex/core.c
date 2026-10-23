@@ -616,12 +616,13 @@ int get_futex_key(u32 __user *uaddr, unsigned int flags, union futex_key *key,
 	 */
 	if (!fshared) {
 		/*
-		 * On no-MMU, shared futexes are treated as private, therefore
-		 * we must not include the current process in the key. Since
-		 * there is only one address space, the address is a unique key
-		 * on its own.
+		 * On conventional no-MMU, shared futexes are treated as private
+		 * and the single address space makes the address unique on its
+		 * own. Wasm instead has an independent linear memory per mm,
+		 * even without MMU page tables. Keep that identity in its key;
+		 * CLONE_VM threads still share the same mm and futex queues.
 		 */
-		if (IS_ENABLED(CONFIG_MMU))
+		if (IS_ENABLED(CONFIG_MMU) || IS_ENABLED(CONFIG_WASM))
 			key->private.mm = mm;
 		else
 			key->private.mm = NULL;
