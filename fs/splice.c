@@ -1440,6 +1440,56 @@ static ssize_t __do_splice(struct file *in, loff_t __user *off_in,
 	return ret;
 }
 
+#ifdef CONFIG_WASM
+/*
+ * User linear-memory offsets cannot be pinned as kernel struct pages. Copy
+ * through uaccess into pipe-owned pages instead; no alias into user memory is
+ * retained, including for SPLICE_F_GIFT. The outer vmsplice path still owns
+ * locking, blocking, reader wakeups and notifications.
+ */
+static ssize_t iter_to_pipe(struct iov_iter *from,
+			    struct pipe_inode_info *pipe,
+			    unsigned int flags)
+{
+	size_t total = 0;
+	ssize_t ret = 0;
+
+	while (iov_iter_count(from)) {
+		struct pipe_buffer buf = {
+			.ops = &user_page_pipe_buf_ops,
+			.flags = flags,
+		};
+		size_t wanted = min_t(size_t, iov_iter_count(from), PAGE_SIZE);
+
+		/* Do not consume or fault user data when there is no pipe slot. */
+		if (pipe_is_full(pipe)) {
+			ret = -EAGAIN;
+			break;
+		}
+		buf.page = alloc_page(GFP_USER);
+		if (!buf.page) {
+			ret = -ENOMEM;
+			break;
+		}
+		buf.len = copy_page_from_iter(buf.page, 0, wanted, from);
+		if (!buf.len) {
+			put_page(buf.page);
+			ret = -EFAULT;
+			break;
+		}
+		ret = add_to_pipe(pipe, &buf);
+		if (ret < 0) {
+			/* add_to_pipe already released the page on failure. */
+			iov_iter_revert(from, buf.len);
+			break;
+		}
+		total += ret;
+		if (buf.len < wanted)
+			break;
+	}
+	return total ? (ssize_t)total : ret;
+}
+#else
 static ssize_t iter_to_pipe(struct iov_iter *from,
 			    struct pipe_inode_info *pipe,
 			    unsigned int flags)
@@ -1486,6 +1536,7 @@ static ssize_t iter_to_pipe(struct iov_iter *from,
 out:
 	return total ? total : ret;
 }
+#endif
 
 static int pipe_to_user(struct pipe_inode_info *pipe, struct pipe_buffer *buf,
 			struct splice_desc *sd)
