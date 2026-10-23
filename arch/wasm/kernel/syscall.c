@@ -175,7 +175,17 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 	if (!(flags & MAP_ANONYMOUS))
 		return wasm_mmap_file(addr, len, prot, flags, fd, pgoff);
 #endif
-	if (!len || pgoff || (flags & MAP_TYPE) != MAP_PRIVATE ||
+	/* mmap uses byte offsets on wasm64; mmap2 uses 4096-byte units on
+	 * wasm32 even though a Wasm page is 64 KiB. Preserve the Linux entry
+	 * alignment check before ignoring the offset of anonymous backing. */
+#ifdef CONFIG_64BIT
+	if (!PAGE_ALIGNED(pgoff))
+		return -EINVAL;
+#else
+	if (pgoff & ((PAGE_SIZE >> 12) - 1))
+		return -EINVAL;
+#endif
+	if (!len || (flags & MAP_TYPE) != MAP_PRIVATE ||
 	    !(flags & MAP_ANONYMOUS))
 		return -EINVAL;
 	if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && !addr)
@@ -195,9 +205,10 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 	if ((flags & MAP_FIXED) && !(flags & MAP_FIXED_NOREPLACE))
 		return wasm_user_v2_mmap_fixed(addr, ALIGN(len, PAGE_SIZE));
 	/* NOREPLACE takes priority even when the caller also supplies FIXED.
-	 * Normalize advisory bits and the ignored anonymous fd for old allocators. */
+	 * Normalize advisory bits and ignored anonymous fd/offset for old allocators. */
 	flags &= ~(MAP_FIXED | advisory_flags);
 	fd = -1;
+	pgoff = 0;
 
 	return wasm_user_v2_mmap(addr, ALIGN(len, PAGE_SIZE), prot, flags, fd,
 				 pgoff);
