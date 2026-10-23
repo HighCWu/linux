@@ -1139,9 +1139,16 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 	}
 
 	if ((flags & MSG_ZEROCOPY) && size) {
+		/*
+		 * Wasm user offsets cannot be pinned as kernel page fragments.
+		 * Retain the normal copy path and its copied completion notice.
+		 */
+		bool zc_supported = !IS_ENABLED(CONFIG_WASM) ||
+			!user_backed_iter(&msg->msg_iter);
+
 		if (msg->msg_ubuf) {
 			uarg = msg->msg_ubuf;
-			if (sk->sk_route_caps & NETIF_F_SG)
+			if ((sk->sk_route_caps & NETIF_F_SG) && zc_supported)
 				zc = MSG_ZEROCOPY;
 		} else if (sock_flag(sk, SOCK_ZEROCOPY)) {
 			skb = tcp_write_queue_tail(sk);
@@ -1151,7 +1158,7 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 				err = -ENOBUFS;
 				goto out_err;
 			}
-			if (sk->sk_route_caps & NETIF_F_SG)
+			if ((sk->sk_route_caps & NETIF_F_SG) && zc_supported)
 				zc = MSG_ZEROCOPY;
 			else
 				uarg_to_msgzc(uarg)->zerocopy = 0;

@@ -1542,6 +1542,13 @@ emsgsize:
 
 	if ((flags & MSG_ZEROCOPY) && length) {
 		struct msghdr *msg = from;
+		/*
+		 * Preserve copied completions without pinning Wasm user offsets.
+		 * Other getfrag callbacks need not receive a struct msghdr.
+		 */
+		bool zc_supported = !IS_ENABLED(CONFIG_WASM) ||
+			getfrag != ip_generic_getfrag ||
+			!user_backed_iter(&msg->msg_iter);
 
 		if (getfrag == ip_generic_getfrag && msg->msg_ubuf) {
 			if (skb_zcopy(skb) && msg->msg_ubuf != skb_zcopy(skb))
@@ -1551,7 +1558,7 @@ emsgsize:
 			 * be able to handle it.
 			 */
 			if ((rt->dst.dev->features & NETIF_F_SG) &&
-			    csummode == CHECKSUM_PARTIAL) {
+			    csummode == CHECKSUM_PARTIAL && zc_supported) {
 				paged = true;
 				zc = true;
 				uarg = msg->msg_ubuf;
@@ -1563,7 +1570,7 @@ emsgsize:
 				return -ENOBUFS;
 			extra_uref = !skb_zcopy(skb);	/* only ref on new uarg */
 			if (rt->dst.dev->features & NETIF_F_SG &&
-			    csummode == CHECKSUM_PARTIAL) {
+			    csummode == CHECKSUM_PARTIAL && zc_supported) {
 				paged = true;
 				zc = true;
 			} else {
