@@ -10,9 +10,14 @@ struct clone_fn {
 int wasm_call_clone_fn(void *arg)
 {
 	struct clone_fn *clone_fn = arg;
-	wasm_user_switch_entry((uintptr_t)clone_fn->fn,
-			       (uintptr_t)clone_fn->arg);
+	uintptr_t fn = (uintptr_t)clone_fn->fn;
+	uintptr_t fn_arg = (uintptr_t)clone_fn->arg;
+
+	/* The execution bridge retains only scalar values. It may leave C
+	 * non-locally while validating/restoring a continuation, so release
+	 * bootstrap metadata before handing control across that boundary. */
 	kfree(clone_fn);
+	wasm_user_switch_entry(fn, fn_arg);
 	return 0;
 }
 
