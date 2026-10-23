@@ -14,6 +14,9 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
+#ifdef CONFIG_WASM
+#include <asm/irq.h>
+#endif
 
 #ifdef CONFIG_MMU
 /**
@@ -167,6 +170,13 @@ static int process_vm_rw_single_vec(unsigned long addr,
 
 		bytes = min_t(size_t, bytes, PVM_NOMMU_BUFFER_SIZE);
 		bytes = min_t(size_t, bytes, PAGE_SIZE - offset_in_page(addr));
+		/* Linear-memory copies cannot fault in a page and thereby reach
+		 * the scheduler. Poll before starting the next synchronous copy,
+		 * with no remote mailbox or mmap lock held across scheduling. */
+#ifdef CONFIG_WASM
+		wasm_timer_check();
+#endif
+		cond_resched();
 		if (vm_write) {
 			copied = copy_from_iter(buffer, bytes, iter);
 			remote = copied ? access_remote_vm(mm, addr, buffer,
