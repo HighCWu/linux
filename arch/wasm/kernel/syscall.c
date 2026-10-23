@@ -100,8 +100,18 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 			regs->syscall_return = sp_error;
 		else if (nr < 0 || nr >= ARRAY_SIZE(syscall_table))
 			regs->syscall_return = -ENOSYS;
-		else
-			regs->syscall_return = syscall_table[nr](regs);
+		else {
+			struct pt_regs entered = *regs;
+			long result;
+
+			/* A direct allocator may call back into Linux (for example
+			 * while acquiring a userspace mutex). Nested calls use the
+			 * same task_pt_regs storage. Preserve the outer entry state,
+			 * including any ptrace edits, before reporting its exit. */
+			result = syscall_table[nr](regs);
+			*regs = entered;
+			regs->syscall_return = result;
+		}
 
 		syscall_exit_to_user_mode(regs);
 		regs->user_mode = 1;
@@ -115,6 +125,23 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 SYSCALL_DEFINE0(wasm_shm_unavailable)
 {
 	return -ENOSYS;
+}
+
+/* Private execution boundary: a user allocator can re-enter a live kernel
+ * callback. Restore its caller's IRQ state before resuming that callback,
+ * not after the outer syscall has already performed post-callback cleanup. */
+__attribute__((export_name("callback_irq_save_v1"))) unsigned int
+wasm_callback_irq_save_v1(void)
+{
+	return (unsigned int)arch_local_save_flags();
+}
+
+__attribute__((export_name("callback_irq_restore_v1"))) void
+wasm_callback_irq_restore_v1(unsigned int flags)
+{
+	unsigned long irqflags = flags;
+
+	local_irq_restore(irqflags);
 }
 
 SYSCALL_DEFINE1(set_thread_area, unsigned long, addr)
