@@ -1,4 +1,5 @@
 #include <asm/wasm_imports.h>
+#include <asm/user_context.h>
 #include <asm/unistd.h>
 #include <linux/entry-common.h>
 #include <linux/errno.h>
@@ -100,19 +101,12 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	 * completed its context-tracking transition. Make that transition here so
 	 * syscalls made by a handler enter from a real userspace context.
 	 */
-	local_irq_disable();
 	regs->user_mode = 1;
-	exit_to_user_mode();
-	local_irq_enable();
 
-	failed = wasm_user_signal_v1_call_handler(
+	failed = wasm_run_user_signal(
 		(uintptr_t)sa->sa_restorer, (uintptr_t)sa->sa_handler, ksig->sig,
 		sp, (unsigned long)frame.stack.ss_sp, frame.stack.ss_size,
 		callback_flags);
-
-	local_irq_disable();
-	enter_from_user_mode(regs);
-	local_irq_enable();
 
 	/*
 	 * A synchronous handler can make nested syscalls, which use the same

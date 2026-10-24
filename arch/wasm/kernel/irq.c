@@ -9,6 +9,7 @@
 #include <linux/irqdomain.h>
 #include <linux/processor.h>
 #include <linux/entry-common.h>
+#include <linux/string.h>
 
 /*
  * Two-level pending bitmap. A wasm atomic wait can only watch a single
@@ -125,23 +126,28 @@ void cpu_relax(void)
 	local_irq_restore(flags);
 }
 
-static void run_irq(irq_hw_number_t hwirq)
+static void noinstr run_irq(irq_hw_number_t hwirq)
 {
-	struct pt_regs regs = {
-		.user_mode = current_thread_info()->in_user_context,
-	};
+	struct pt_regs regs;
+	bool was_user = current_thread_info()->in_user_context;
 	unsigned long flags;
 	struct pt_regs *old_regs;
 
 	/* interrupt handlers need to run with interrupts disabled */
+	regs.user_mode = was_user;
 	local_irq_save(flags);
 	if (user_mode(&regs))
 		enter_from_user_mode(&regs);
+	instrumentation_begin();
+	/* An aggregate initializer could call instrumented memset before entry. */
+	memset(&regs, 0, sizeof(regs));
+	regs.user_mode = was_user;
 	old_regs = set_irq_regs(&regs);
 	irq_enter();
 	generic_handle_domain_irq(NULL, hwirq);
 	irq_exit();
 	set_irq_regs(old_regs);
+	instrumentation_end();
 	/*
 	 * Cooperative delivery runs on an existing C boundary. Do not perform
 	 * pending signal/ptrace work here, especially before clone user TLS.
@@ -151,12 +157,12 @@ static void run_irq(irq_hw_number_t hwirq)
 	local_irq_restore(flags);
 }
 
-unsigned long arch_local_save_flags(void)
+unsigned long noinstr arch_local_save_flags(void)
 {
 	return __this_cpu_read(irqflags);
 }
 
-static void run_irqs(void)
+static void noinstr run_irqs(void)
 {
 	struct pending_irqs *p = this_cpu_ptr(&irq_pending);
 	u64 summary = atomic64_xchg(&p->summary, 0);
@@ -193,7 +199,7 @@ trigger_irq(unsigned int irq)
 	trigger_irq_for_cpu(READ_ONCE(irq_target[irq]), irq);
 }
 
-void arch_local_irq_restore(unsigned long flags)
+void noinstr arch_local_irq_restore(unsigned long flags)
 {
 	if (flags == ARCH_IRQ_ENABLED && !in_interrupt())
 		run_irqs();

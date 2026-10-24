@@ -21,11 +21,11 @@ static inline void *get_stack_pointer(void)
 
 
 void set_current_cpu(int cpu);
-int get_current_cpu(void);
+int noinstr get_current_cpu(void);
 
 struct task_struct;
 void set_current_task(struct task_struct *task);
-struct task_struct *get_current_task(void);
+noinstr struct task_struct *get_current_task(void);
 struct task_struct *get_current_task_on(int cpu);
 
 void set_irq_enabled(u32 flags);

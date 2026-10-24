@@ -224,9 +224,7 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	 * Do not run return work before a new clone's user callback has set up
 	 * its C stack and TLS. Its first syscall is the existing checkpoint.
 	 */
-	wasm_set_user_context(true);
-	wasm_user_call();
-	wasm_set_user_context(false);
+	wasm_run_user();
 
 	// if we're here, either the thread returned from its entrypoint without exiting,
 	// or its entrypoint threw an error (likely either an `unreachable` instruction being

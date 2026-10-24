@@ -19,7 +19,7 @@ void set_current_cpu(int cpu)
 	__asm__ volatile("local.get %0\n"
 			 "global.set current_cpu" ::"r"(cpu));
 }
-int get_current_cpu(void)
+int noinstr get_current_cpu(void)
 {
 	int cpu;
 	__asm__ volatile("global.get current_cpu\n"
@@ -34,7 +34,7 @@ void set_current_task(struct task_struct *task)
 	__asm__ volatile("local.get %0\n"
 			 "global.set current_task" ::"r"(task));
 }
-struct task_struct *get_current_task(void)
+noinstr struct task_struct *get_current_task(void)
 {
 	struct task_struct *task;
 	__asm__ volatile("global.get current_task\n"

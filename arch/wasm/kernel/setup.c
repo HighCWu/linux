@@ -1,6 +1,7 @@
 #include <asm/bug.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
+#include <asm/user_context.h>
 #include <linux/libfdt.h>
 #include <linux/memblock.h>
 #include <linux/of.h>
@@ -97,6 +98,8 @@ void __init setup_arch(char **cmdline_p)
 {
 	static char command_line[COMMAND_LINE_SIZE];
 	int ret, ncpus;
+
+	wasm_check_user_context_abi();
 	strscpy(command_line, boot_command_line, COMMAND_LINE_SIZE);
 	*cmdline_p = command_line;
 

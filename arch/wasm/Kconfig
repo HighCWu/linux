@@ -33,6 +33,19 @@ config CMDLINE
 config MMU
 	def_bool n
 
+config WASM_VTIME
+	bool "Experimental user context tracking and generic CPU accounting"
+	default n
+	select HAVE_CONTEXT_TRACKING_USER
+	select HAVE_VIRT_CPU_ACCOUNTING_GEN
+	help
+	  Expose generic virtual CPU accounting for architecture bring-up.
+	  Select VIRT_CPU_ACCOUNTING_GEN and CONTEXT_TRACKING_USER_FORCE in
+	  the separate validation configuration. This requires a host with the
+	  user_context_v1 execution contract. It does not provide asynchronous
+	  user preemption or physical host CPU/steal time measurements.
+	  Say N for release kernels until the execution paths are validated.
+
 config WASM_MMAP_COPY_TEST
 	bool "Enable experimental staging-copy test syscall"
 	default n

@@ -60,6 +60,11 @@ int wasm_import(user, call_siginfo_handler)(uintptr_t trampoline,
 					    uintptr_t fn, u32 sig);
 void wasm_import(user, halt_signal_handler)(void);
 
+#ifdef CONFIG_CONTEXT_TRACKING_USER
+/* Kernel/host contract only: user callbacks must bracket their execution. */
+int wasm_import(user_context_v1, abi)(void);
+#endif
+
 /* Versioned execution ABI, not a Linux application interface. */
 int wasm_import(user_signal_v1, stack_pointer)(unsigned long *sp);
 int wasm_import(user_signal_v1, call_handler)(uintptr_t trampoline,
