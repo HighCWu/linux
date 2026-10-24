@@ -153,7 +153,7 @@ static int copy_args(struct linux_binprm *bprm)
 	exec->execfn = exec->random + WASM_AT_RANDOM_SIZE +
 		       bprm->exec - bprm->p;
 	exec->preserve_argv0 =
-		bprm->interp_flags & BINPRM_FLAGS_PRESERVE_ARGV0;
+		!!(bprm->interp_flags & BINPRM_FLAGS_PRESERVE_ARGV0);
 
 	args->argc = bprm->argc;
 	args->envc = bprm->envc;
