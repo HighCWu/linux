@@ -226,12 +226,12 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	 */
 	wasm_run_user();
 
-	// if we're here, either the thread returned from its entrypoint without exiting,
-	// or its entrypoint threw an error (likely either an `unreachable` instruction being
-	// executed, or an out of range memory access.)
+	/* A returned entry or fatal user trap terminates the whole process,
+	 * not just this Worker. Ordinary SYS_exit still uses do_exit().
+	 */
 
 	local_irq_enable();
-	do_exit(SIGSEGV);
+	do_group_exit(SIGSEGV);
 }
 
 static void task_entry(void *args)
