@@ -70,7 +70,7 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 		 * user-stack import, or RCU operation. A restart follows a real
 		 * generic exit transition too, so it must enter again.
 		 */
-		local_irq_disable();
+		raw_local_irq_disable();
 		enter_from_user_mode(regs);
 		instrumentation_begin();
 		regs->user_mode = 0;
