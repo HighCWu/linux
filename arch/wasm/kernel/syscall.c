@@ -54,39 +54,51 @@ syscall_handler_t syscall_table[__NR_syscalls] = {
 #undef sys_shmdt
 };
 
-__attribute__((export_name("syscall"))) long
+__attribute__((export_name("syscall"))) noinstr long
 wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 	     unsigned long arg2, unsigned long arg3, unsigned long arg4,
 	     unsigned long arg5)
 {
 	struct pt_regs *regs = current_pt_regs();
 	unsigned long sp = 0;
-	int sp_error = wasm_user_signal_v1_stack_pointer(&sp);
-
-	regs->user_sp = sp;
-
-	regs->syscall_args[0] = arg0;
-	regs->syscall_args[1] = arg1;
-	regs->syscall_args[2] = arg2;
-	regs->syscall_args[3] = arg3;
-	regs->syscall_args[4] = arg4;
-	regs->syscall_args[5] = arg5;
+	int sp_error = 0;
+	bool first_entry = true;
 
 	for (;;) {
 		/*
-		 * WebAssembly has no asynchronous trap from user mode.  Reaching
-		 * this boundary therefore proves that the CPU passed through a
-		 * userspace RCU quiescent state.  It also gives the generic entry
-		 * code the IRQ-disabled state it expects.
+		 * Reactivate the kernel context before any instrumentable work,
+		 * user-stack import, or RCU operation. A restart follows a real
+		 * generic exit transition too, so it must enter again.
 		 */
 		local_irq_disable();
-		rcu_note_context_switch(false);
+		enter_from_user_mode(regs);
+		instrumentation_begin();
 		regs->user_mode = 0;
+		/*
+		 * With no asynchronous user trap, this entry proves a userspace
+		 * quiescent state even under the default tick accounting config.
+		 * Report it only after the generic entry has reactivated RCU.
+		 */
+		rcu_note_context_switch(false);
+		local_irq_enable();
+
+		if (first_entry) {
+			sp_error = wasm_user_signal_v1_stack_pointer(&sp);
+			regs->user_sp = sp;
+			regs->syscall_args[0] = arg0;
+			regs->syscall_args[1] = arg1;
+			regs->syscall_args[2] = arg2;
+			regs->syscall_args[3] = arg3;
+			regs->syscall_args[4] = arg4;
+			regs->syscall_args[5] = arg5;
+			first_entry = false;
+		}
+
 		/* Generic ptrace entry work reads the current syscall number. */
 		regs->syscall_nr = nr;
 		/* Entry tracing may skip execution and supply its own result. */
 		regs->syscall_return = -ENOSYS;
-		nr = syscall_enter_from_user_mode(regs, nr);
+		nr = syscall_enter_from_user_mode_work(regs, nr);
 		regs->syscall_nr = nr;
 		regs->restart_syscall_nr = -1;
 
@@ -115,6 +127,7 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 			regs->syscall_return = result;
 		}
 
+		instrumentation_end();
 		syscall_exit_to_user_mode(regs);
 		regs->user_mode = 1;
 
