@@ -6,7 +6,7 @@
 
 struct task_struct;
 
-#define user_mode(regs) (regs->user_mode)
+#define user_mode(regs) ((regs)->user_mode)
 #define instruction_pointer(regs) (-1)
 #define user_stack_pointer(regs) ((regs)->user_sp)
 
