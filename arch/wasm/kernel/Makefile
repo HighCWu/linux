@@ -17,7 +17,8 @@ obj-y += \
 	signal.o \
 	stacktrace.o \
 	syscall.o \
-	time.o
+	time.o \
+	user_context.o
 
 obj-$(CONFIG_SMP) += smp.o
 obj-$(CONFIG_WASM_MMAP_COPY_TEST) += mmap_test.o

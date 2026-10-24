@@ -3,6 +3,7 @@
 #include <asm/remote_vm.h>
 #include <asm/mmap_file.h>
 #include <asm/sysmem.h>
+#include <asm/user_context.h>
 #include <asm/wasm_imports.h>
 #include <linux/entry-common.h>
 #include <linux/preempt.h>
@@ -22,6 +23,7 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 	*dst = *src;
 	atomic_set(&task_thread_info(dst)->running_cpu, WASM_CPU_PARKED);
 	task_thread_info(dst)->context_mm = NULL;
+	task_thread_info(dst)->in_user_context = false;
 	task_thread_info(dst)->active_siginfo = NULL;
 	task_thread_info(dst)->active_signal_frame = NULL;
 	task_thread_info(dst)->bootstrap_args = NULL;
@@ -218,7 +220,13 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	// callback returns when the kernel thread execs a process
 	fn_ret = fn(fn_arg);
 
+	/*
+	 * Do not run return work before a new clone's user callback has set up
+	 * its C stack and TLS. Its first syscall is the existing checkpoint.
+	 */
+	wasm_set_user_context(true);
 	wasm_user_call();
+	wasm_set_user_context(false);
 
 	// if we're here, either the thread returned from its entrypoint without exiting,
 	// or its entrypoint threw an error (likely either an `unreachable` instruction being

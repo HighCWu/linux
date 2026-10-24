@@ -34,6 +34,8 @@ struct thread_info {
 	/* The mm represented by this worker's local JS user context. */
 	struct mm_struct *context_mm;
 	unsigned long tp_value;
+	/* Execution phase, independent of the saved syscall/signal registers. */
+	bool in_user_context;
 	const struct kernel_siginfo *active_siginfo;
 	struct wasm_signal_frame *active_signal_frame;
 	/* Non-NULL only until a newly-created Worker starts or is aborted. */
@@ -55,6 +57,7 @@ struct thread_info {
 		.running_cpu = ATOMIC_INIT(0),       \
 		.context_mm = NULL,                  \
 		.tp_value = ~0UL,                    \
+		.in_user_context = false,            \
 		.active_siginfo = NULL,              \
 		.active_signal_frame = NULL,         \
 		.bootstrap_args = NULL,              \

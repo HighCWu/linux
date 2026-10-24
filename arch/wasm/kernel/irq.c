@@ -8,6 +8,7 @@
 #include <linux/irqchip.h>
 #include <linux/irqdomain.h>
 #include <linux/processor.h>
+#include <linux/entry-common.h>
 
 /*
  * Two-level pending bitmap. A wasm atomic wait can only watch a single
@@ -126,16 +127,27 @@ void cpu_relax(void)
 
 static void run_irq(irq_hw_number_t hwirq)
 {
-	static struct pt_regs dummy;
+	struct pt_regs regs = {
+		.user_mode = current_thread_info()->in_user_context,
+	};
 	unsigned long flags;
-	struct pt_regs *old_regs = set_irq_regs((struct pt_regs *)&dummy);
+	struct pt_regs *old_regs;
 
 	/* interrupt handlers need to run with interrupts disabled */
 	local_irq_save(flags);
+	if (user_mode(&regs))
+		enter_from_user_mode(&regs);
+	old_regs = set_irq_regs(&regs);
 	irq_enter();
 	generic_handle_domain_irq(NULL, hwirq);
 	irq_exit();
 	set_irq_regs(old_regs);
+	/*
+	 * Cooperative delivery runs on an existing C boundary. Do not perform
+	 * pending signal/ptrace work here, especially before clone user TLS.
+	 */
+	if (user_mode(&regs))
+		exit_to_user_mode();
 	local_irq_restore(flags);
 }
 
