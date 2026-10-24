@@ -140,6 +140,7 @@ static void noinstr run_irq(irq_hw_number_t hwirq)
 		enter_from_user_mode(&regs);
 	instrumentation_begin();
 	/* An aggregate initializer could call instrumented memset before entry. */
+	barrier_data(&regs);
 	memset(&regs, 0, sizeof(regs));
 	regs.user_mode = was_user;
 	old_regs = set_irq_regs(&regs);
