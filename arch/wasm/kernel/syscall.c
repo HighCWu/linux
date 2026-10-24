@@ -2,6 +2,7 @@
 #include <linux/mman.h>
 #include <linux/overflow.h>
 #include <linux/rcupdate.h>
+#include <linux/seccomp.h>
 #include <linux/syscalls.h>
 #ifdef CONFIG_WASM_MMAP_COPY_TEST
 #include <linux/slab.h>
@@ -140,6 +141,21 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 SYSCALL_DEFINE0(wasm_shm_unavailable)
 {
 	return -ENOSYS;
+}
+
+/* Private execution query, not a user import or a syscall. An adapter must
+ * route restricted calls through wasm_syscall before inspecting user memory,
+ * rejecting arguments, or starting a continuation. The ordinary kernel entry
+ * then performs ptrace/seccomp handling; the host does not implement policy.
+ */
+__attribute__((export_name("seccomp_strict_v1"))) int
+wasm_seccomp_strict_v1(void)
+{
+#ifdef CONFIG_SECCOMP
+	return READ_ONCE(current->seccomp.mode) == SECCOMP_MODE_STRICT;
+#else
+	return 0;
+#endif
 }
 
 /* Private execution boundary: a user allocator can re-enter a live kernel
