@@ -13,6 +13,7 @@
 #include <linux/sched/signal.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/syscalls.h>
 
 /* Four pages amortize host calls without requiring a large kernel allocation. */
@@ -151,11 +152,8 @@ static int copy_args(struct linux_binprm *bprm)
 	exec->random = exec->auxv + auxv_size;
 	exec->execfn = exec->random + WASM_AT_RANDOM_SIZE +
 		       bprm->exec - bprm->p;
-	exec->secureexec = bprm->secureexec;
 	exec->preserve_argv0 =
 		bprm->interp_flags & BINPRM_FLAGS_PRESERVE_ARGV0;
-	exec->have_execfd = bprm->have_execfd;
-	exec->execfd = bprm->execfd;
 
 	args->argc = bprm->argc;
 	args->envc = bprm->envc;
@@ -325,6 +323,16 @@ restore:
 	return ret;
 }
 
+static void commit_wasm_exec_args(struct linux_binprm *bprm)
+{
+	struct wasm_exec_args *exec = current->mm->context.exec_args;
+
+	/* Final credentials and an interpreter execfd are set by begin_new_exec(). */
+	exec->secureexec = bprm->secureexec;
+	exec->have_execfd = bprm->have_execfd;
+	exec->execfd = bprm->execfd;
+}
+
 static int load_wasm_binary(struct linux_binprm *bprm)
 {
 	loff_t offset = 0;
@@ -334,7 +342,7 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	bool compiling = false;
 	u32 chunk_size;
 
-	if (strncmp(bprm->buf, "\0asm\1\0\0\0", 8))
+	if (memcmp(bprm->buf, "\0asm\1\0\0\0", 8))
 		return -ENOEXEC;
 
 	ret = file_get_size(bprm->file, &filesize);
@@ -386,7 +394,8 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	ret = begin_new_exec(bprm);
 	if (ret)
 		goto err;
-	// point of no return starts here
+	/* The new mm and credentials are committed at this point. */
+	commit_wasm_exec_args(bprm);
 
 #ifdef CONFIG_64BIT
 	set_personality(PER_LINUX);
