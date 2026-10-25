@@ -879,6 +879,18 @@ void fuse_copy_finish(struct fuse_copy_state *cs)
 }
 
 /*
+ * Wasm user offsets name a separate linear memory, not pinnable kernel
+ * pages. Its bounded usercopy imports are synchronous and do not fault in
+ * pages, so they can also run while the request is locked. Keep pipe/kernel
+ * pages and other architectures' paths unchanged.
+ */
+static bool fuse_copy_user_iter(struct fuse_copy_state *cs)
+{
+	return IS_ENABLED(CONFIG_WASM) && !cs->pipebufs && !cs->is_uring &&
+		cs->iter && user_backed_iter(cs->iter);
+}
+
+/*
  * Get another pagefull of userspace buffer, and map it to kernel
  * address space, and lock request
  */
@@ -892,6 +904,8 @@ static int fuse_copy_fill(struct fuse_copy_state *cs)
 		return err;
 
 	fuse_copy_finish(cs);
+	if (fuse_copy_user_iter(cs) && cs->usercopy_error)
+		return cs->usercopy_error;
 	if (cs->pipebufs) {
 		struct pipe_buffer *buf = cs->pipebufs;
 
@@ -926,6 +940,11 @@ static int fuse_copy_fill(struct fuse_copy_state *cs)
 			cs->pipebufs++;
 			cs->nr_segs++;
 		}
+	} else if (fuse_copy_user_iter(cs)) {
+		cs->len = min_t(size_t, PAGE_SIZE, iov_iter_count(cs->iter));
+		cs->offset = 0;
+		if (!cs->len)
+			return -EFAULT;
 	} else {
 		size_t off;
 		err = iov_iter_get_pages2(cs->iter, &page, PAGE_SIZE, 1, &off);
@@ -944,7 +963,20 @@ static int fuse_copy_fill(struct fuse_copy_state *cs)
 static int fuse_copy_do(struct fuse_copy_state *cs, void **val, unsigned *size)
 {
 	unsigned ncpy = min(*size, cs->len);
-	if (val) {
+	bool usercopy = fuse_copy_user_iter(cs);
+
+	if (usercopy) {
+		unsigned copied = ncpy;
+
+		if (val)
+			copied = cs->write ? copy_to_iter(*val, ncpy, cs->iter) :
+				copy_from_iter(*val, ncpy, cs->iter);
+		else
+			iov_iter_advance(cs->iter, ncpy);
+		if (copied != ncpy)
+			cs->usercopy_error = -EFAULT;
+		ncpy = copied;
+	} else if (val) {
 		void *pgaddr = kmap_local_page(cs->pg);
 		void *buf = pgaddr + cs->offset;
 
@@ -954,11 +986,18 @@ static int fuse_copy_do(struct fuse_copy_state *cs, void **val, unsigned *size)
 			memcpy(*val, buf, ncpy);
 
 		kunmap_local(pgaddr);
-		*val += ncpy;
 	}
+	if (val)
+		*val += ncpy;
 	*size -= ncpy;
 	cs->len -= ncpy;
 	cs->offset += ncpy;
+	/*
+	 * The existing callers consume byte counts. Force the next fill to
+	 * propagate a short-copy fault, never spin without forward progress.
+	 */
+	if (usercopy && cs->usercopy_error)
+		cs->len = 0;
 	if (cs->is_uring)
 		cs->ring.copied_sz += ncpy;
 

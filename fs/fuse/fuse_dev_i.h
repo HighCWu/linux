@@ -31,6 +31,7 @@ struct fuse_copy_state {
 	struct page *pg;
 	unsigned int len;
 	unsigned int offset;
+	int usercopy_error;
 	bool write:1;
 	bool move_folios:1;
 	bool is_uring:1;
