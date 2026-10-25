@@ -109,11 +109,12 @@ bool wasm_mmap_snapshot_source(struct file *file)
 		wasm_bdev_has_snapshot_source(sb->s_bdev);
 }
 
-/* Consumes the caller's file reference and uses its authenticated size/source. No userspace or
- * host-selected pathname is read. kernel_read owns its producer until return;
- * the synchronous initialized-copy bridge never publishes partial data. */
-long wasm_mmap_copy_file(struct file *file, unsigned long length,
-			u64 offset, loff_t size)
+/* Consumes the caller's file reference. kernel_read owns its producer until
+ * return; an allocator callback never sees a still-running producer. Strict
+ * snapshot fixtures require exact content. Ordinary NOMMU copies instead
+ * accept one short read and zero the remainder, as mm/nommu.c does. */
+static long copy_file(struct file *file, unsigned long length,
+		      u64 offset, loff_t size, bool snapshot)
 {
 	unsigned long rounded;
 	loff_t position;
@@ -128,10 +129,12 @@ long wasm_mmap_copy_file(struct file *file, unsigned long length,
 		goto put;
 	rounded = ALIGN(length, PAGE_SIZE);
 	atomic_inc(&copy_requests);
-	/* Permit a final partial page, never a page wholly beyond EOF. */
-	if (size <= 0 || offset >= size || rounded - PAGE_SIZE >= size - offset)
+	/* The strict snapshot contract rejects pages wholly beyond EOF.
+	 * Ordinary NOMMU copies may instead contain an entirely zero tail. */
+	if (snapshot && (size <= 0 || offset >= size ||
+			 rounded - PAGE_SIZE >= size - offset))
 		goto out;
-	count = min_t(u64, rounded, size - offset);
+	count = snapshot ? min_t(u64, rounded, size - offset) : rounded;
 	result = -ENOMEM;
 	if (!reserve_copy(rounded))
 		goto out;
@@ -149,6 +152,16 @@ long wasm_mmap_copy_file(struct file *file, unsigned long length,
 		}
 		read = kernel_read(file, staging + done, count - done, &position);
 
+		if (!snapshot) {
+			if (read < 0) {
+				result = read;
+				goto free;
+			}
+			/* The initialized allocator clears rounded bytes before
+			 * copying these initialized bytes, including a zero read. */
+			count = read;
+			break;
+		}
 		if (read <= 0) {
 			result = read ? read : -EIO;
 			goto free;
@@ -192,6 +205,12 @@ put:
 	return result;
 }
 
+long wasm_mmap_copy_file(struct file *file, unsigned long length,
+			u64 offset, loff_t size)
+{
+	return copy_file(file, length, offset, size, true);
+}
+
 #ifdef CONFIG_WASM_FILE_MMAP
 /* Standard Linux mmap/mmap2 shape; the versioned bridge carries only a bounded
  * copy, never fd/offset/provenance. NOMMU PROT_READ is not enforced write
@@ -207,6 +226,7 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 		MAP_NORESERVE | MAP_STACK | MAP_DENYWRITE | MAP_EXECUTABLE;
 	u64 offset = raw_offset;
 	struct file *file;
+	unsigned long capabilities;
 	long result;
 
 	(void)addr; /* A non-fixed placement hint may be ignored. */
@@ -234,8 +254,19 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 	if (!(file->f_mode & FMODE_READ))
 		goto put;
 	result = -EOPNOTSUPP;
-	if (!S_ISREG(file_inode(file)->i_mode) || !wasm_mmap_snapshot_source(file))
+	if (!S_ISREG(file_inode(file)->i_mode))
 		goto put;
+	/* Use the filesystem's NOMMU copy capability, not an immutable-media
+	 * whitelist. Never substitute a copy for a driver that forbids mapping
+	 * or offers only direct/shared storage in the kernel's own memory. */
+	result = -ENODEV;
+	if (!can_mmap_file(file) || !(file->f_mode & FMODE_CAN_READ))
+		goto put;
+	capabilities = file->f_op->mmap_capabilities ?
+		file->f_op->mmap_capabilities(file) : NOMMU_MAP_COPY;
+	if (!(capabilities & NOMMU_MAP_COPY))
+		goto put;
+	result = -EOPNOTSUPP;
 	/* Old modules must fail before staging allocation or any VFS read.
 	 * Bit 0 describes initialized private-copy execution, not file admission. */
 	if (!(wasm_user_mmap_init_v1_capabilities() & 1))
@@ -243,8 +274,7 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 	result = security_mmap_file(file, prot, flags);
 	if (result)
 		goto put;
-	return wasm_mmap_copy_file(file, length, offset,
-				   i_size_read(file_inode(file)));
+	return copy_file(file, length, offset, 0, false);
 put:
 	fput(file);
 	return result;

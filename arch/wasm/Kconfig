@@ -66,7 +66,8 @@ config WASM_FILE_MMAP
 	select WASM_FILE_COPY_CORE
 	help
 	  Candidate standard mmap/mmap2 support for independent eager copies of
-	  regular files on verified immutable single-device EROFS snapshots.
+	  readable regular files with NOMMU copy-mapping capability. Short reads
+	  and EOF leave a zero-filled tail; later file writes are not reflected.
 	  Requires initialized-copy v1 execution support in the host and user
 	  module. Each mapping is at most 128 KiB. PROT_READ follows NOMMU
 	  semantics: writes are not trapped. No executable/shared/fixed mappings.

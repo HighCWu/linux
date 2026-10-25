@@ -26,16 +26,27 @@ typedef _Atomic int atomic_t;
 #define min_t(type, a, b) ((type)(a) < (type)(b) ? (type)(a) : (type)(b))
 #define GFP_KERNEL 0
 #define FMODE_READ 1
+#define FMODE_CAN_READ 2
+#define NOMMU_MAP_COPY 1
 #ifndef MAP_TYPE
 #define MAP_TYPE 0x0f
 #endif
 
 struct super_block { bool erofs; void *s_bdev; };
 struct inode { unsigned int i_mode; struct super_block *i_sb; loff_t size; };
-struct file { unsigned int f_mode; struct inode *inode; loff_t f_pos; };
+struct file;
+struct file_operations { unsigned (*mmap_capabilities)(struct file *); };
+static const struct file_operations operations;
+struct file { unsigned int f_mode; struct inode *inode; loff_t f_pos;
+	const struct file_operations *f_op; };
 static struct super_block sb = { true, (void *)1 };
 static struct inode inode = { S_IFREG, &sb, 2 * PAGE_SIZE + 7 };
-static struct file file = { FMODE_READ, &inode, 23 };
+static struct file file = { FMODE_READ | FMODE_CAN_READ, &inode, 23, &operations };
+static bool mappable = true;
+static bool can_mmap_file(struct file *f) { assert(f == &file); return mappable; }
+static unsigned file_capabilities = NOMMU_MAP_COPY;
+static unsigned mmap_capabilities(struct file *f) { assert(f == &file); return file_capabilities; }
+static const struct file_operations explicit_operations = { mmap_capabilities };
 static int pins, allocations, reads, copies, capabilities = 1;
 static int allocation_attempts;
 static int read_mode, fail_allocation, security_error, copy_error;
@@ -82,7 +93,10 @@ static ssize_t kernel_read(struct file *f, void *buffer, size_t length, loff_t *
 	reads++;
 	if (!read_total) first_offset = *position;
 	if (read_mode == 3) return -EINTR;
+	if (read_mode == 4) return 0;
 	if ((read_mode == 1 || read_mode == 2) && read_total) return read_mode == 1 ? 0 : -EIO;
+	if (*position >= f->inode->size) return 0;
+	if (length > (size_t)(f->inode->size - *position)) length = f->inode->size - *position;
 	if (read_mode) length = 7;
 	for (size_t i = 0; i < length; i++) ((u8 *)buffer)[i] = (u8)((*position + i) * 37 + 11);
 	*position += length;

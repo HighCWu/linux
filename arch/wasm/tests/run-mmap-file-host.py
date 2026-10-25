@@ -41,6 +41,18 @@ with tempfile.TemporaryDirectory(prefix="wasm-file-mmap-host-") as directory:
         result = subprocess.run([output], capture_output=True, text=True,
                                 preexec_fn=no_core, timeout=15)
         assert result.returncode != 0 and "== 65536" in result.stderr, result.stderr
+        for before, after in (
+            ("if (!S_ISREG(file_inode(file)->i_mode))",
+             "if (!S_ISREG(file_inode(file)->i_mode) || !wasm_mmap_snapshot_source(file))"),
+            ("if (!snapshot) {", "if (false && !snapshot) {"),
+        ):
+            assert source.count(before) == 1
+            negative = source.replace(before, after)
+            subprocess.run(command, input=shim + "\n" + negative + "\n" + checks,
+                           text=True, check=True)
+            result = subprocess.run([output], capture_output=True, text=True,
+                                    preexec_fn=no_core, timeout=15)
+            assert result.returncode != 0 and "== 65536" in result.stderr, result.stderr
         # Bypass only fatal admission; retain references so this compiles
         # under the same warnings as the positive kernel-function model.
         guard = "fatal_signal_pending(current)"

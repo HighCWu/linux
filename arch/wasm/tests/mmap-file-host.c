@@ -43,12 +43,32 @@ int main(void)
 	file.f_mode = 0;
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -EACCES);
 	file.f_mode = FMODE_READ;
+	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -ENODEV);
+	file.f_mode |= FMODE_CAN_READ;
+	mappable = false;
+	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -ENODEV);
+	mappable = true;
+	file.f_op = &explicit_operations;
+	file_capabilities = 0;
+	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -ENODEV);
+	file_capabilities = NOMMU_MAP_COPY;
+	read_total = 0;
+	assert(wasm_mmap_file(0, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, 0) == 65536);
+	clean();
+	file.f_op = &operations;
 	sb.erofs = false;
-	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -EOPNOTSUPP);
+	assert(!wasm_mmap_snapshot_source(&file));
+	read_total = 0;
+	assert(wasm_mmap_file(0, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, 0) == 65536);
+	clean();
 	sb.erofs = true;
 	sb.s_bdev = (void *)2;
-	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -EOPNOTSUPP);
+	assert(!wasm_mmap_snapshot_source(&file));
+	read_total = 0;
+	assert(wasm_mmap_file(0, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, 0) == 65536);
+	clean();
 	sb.s_bdev = (void *)1;
+	assert(wasm_mmap_snapshot_source(&file));
 	inode.i_mode = S_IFDIR;
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -EOPNOTSUPP);
 	inode.i_mode = S_IFREG;
@@ -58,10 +78,21 @@ int main(void)
 	security_error = -EPERM;
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -EPERM);
 	security_error = 0;
-	refused(10, 2 * PAGE_SIZE, PROT_READ, MAP_PRIVATE, raw_offset(2 * PAGE_SIZE), -EINVAL);
+	read_total = 0;
+	assert(wasm_mmap_file(0, 2 * PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, raw_offset(2 * PAGE_SIZE)) == 65536);
+	assert(last_length == 7 && last_rounded == 2 * PAGE_SIZE);
+	clean();
 	loff_t size = inode.size;
 	inode.size = 0;
-	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -EINVAL);
+	for (int page = 0; page < 2; page++) {
+		read_total = 0;
+		assert(wasm_mmap_file(0, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, raw_offset(page * PAGE_SIZE)) == 65536);
+		assert(last_length == 0 && last_rounded == PAGE_SIZE);
+		clean();
+	}
+	/* The private snapshot fixture still rejects empty sources. */
+	assert(wasm_mmap_copy_file(fget(10), PAGE_SIZE, 0, i_size_read(&inode)) == -EINVAL);
+	clean();
 	inode.size = size;
 	fail_allocation = 1;
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -ENOMEM);
@@ -75,15 +106,23 @@ int main(void)
 	assert(copies == copies_before_record_failure);
 	clean();
 	fail_allocation = 0;
-	for (int mode = 0; mode <= 3; mode++) {
+	for (int mode = 0; mode <= 4; mode++) {
 		read_mode = mode;
 		read_total = 0;
 		int old_copies = copies;
 		long result = wasm_mmap_file(123, 2 * PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, raw_offset(PAGE_SIZE));
+		assert(result == (mode == 3 ? -EINTR : 65536));
+		assert(copies == old_copies + (mode != 3));
+		clean();
+		if (mode == 0) assert(last_length == PAGE_SIZE + 7 && last_rounded == 2 * PAGE_SIZE);
+		if (mode == 1 || mode == 2) assert(last_length == 7);
+		if (mode == 4) assert(last_length == 0);
+		read_total = 0;
+		old_copies = copies;
+		result = wasm_mmap_copy_file(fget(10), 2 * PAGE_SIZE, PAGE_SIZE, inode.size);
 		assert(result == (mode == 0 ? 65536 : mode == 3 ? -EINTR : -EIO));
 		assert(copies == old_copies + (mode == 0));
 		clean();
-		if (mode == 0) assert(last_length == PAGE_SIZE + 7 && last_rounded == 2 * PAGE_SIZE);
 	}
 	read_mode = 0;
 	read_total = 0;
