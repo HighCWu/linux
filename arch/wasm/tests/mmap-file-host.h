@@ -50,7 +50,7 @@ static const struct file_operations explicit_operations = { mmap_capabilities };
 static int pins, allocations, reads, copies, capabilities = 1;
 static int allocation_attempts;
 static int read_mode, fail_allocation, security_error, copy_error;
-static unsigned long security_flags;
+static unsigned long security_flags, security_prot;
 static size_t read_total, last_length, last_rounded;
 static u64 first_offset;
 static bool fatal_pending, fatal_after_read;
@@ -74,8 +74,9 @@ static struct file *fget(long fd) {
 static void fput(struct file *f) { assert(f == &file && pins == 1); pins--; }
 static unsigned int wasm_user_mmap_init_v1_capabilities(void) { return capabilities; }
 static int security_mmap_file(struct file *f, unsigned long prot, unsigned long flags) {
-	assert(f == &file && (prot == 1 || prot == 3));
+	assert(f == &file && prot && !(prot & ~(PROT_READ | PROT_WRITE)));
 	security_flags = flags;
+	security_prot = prot;
 	return security_error;
 }
 static void *kmalloc(size_t length, int flags) {

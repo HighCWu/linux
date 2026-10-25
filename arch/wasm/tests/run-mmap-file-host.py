@@ -42,6 +42,10 @@ with tempfile.TemporaryDirectory(prefix="wasm-file-mmap-host-") as directory:
                                 preexec_fn=no_core, timeout=15)
         assert result.returncode != 0 and "== 65536" in result.stderr, result.stderr
         for before, after in (
+            ("!prot || (prot & ~(PROT_READ | PROT_WRITE))",
+             "(prot != PROT_READ && prot != (PROT_READ | PROT_WRITE))"),
+            ("security_mmap_file(file, prot, flags)",
+             "security_mmap_file(file, prot | PROT_READ, flags)"),
             ("if (!S_ISREG(file_inode(file)->i_mode))",
              "if (!S_ISREG(file_inode(file)->i_mode) || !wasm_mmap_snapshot_source(file))"),
             ("if (!snapshot) {", "if (false && !snapshot) {"),
@@ -52,7 +56,9 @@ with tempfile.TemporaryDirectory(prefix="wasm-file-mmap-host-") as directory:
                            text=True, check=True)
             result = subprocess.run([output], capture_output=True, text=True,
                                     preexec_fn=no_core, timeout=15)
-            assert result.returncode != 0 and "== 65536" in result.stderr, result.stderr
+            assert result.returncode != 0 and ("== 65536" in result.stderr or
+                                              "== error" in result.stderr or
+                                              "security_prot == PROT_WRITE" in result.stderr), result.stderr
         # Bypass only fatal admission; retain references so this compiles
         # under the same warnings as the positive kernel-function model.
         guard = "fatal_signal_pending(current)"

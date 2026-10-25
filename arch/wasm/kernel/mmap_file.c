@@ -234,8 +234,11 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 		return -EINVAL;
 	if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE))
 		return -ENOMEM;
+	/* Like anonymous direct mappings, WRITE may imply READ in NOMMU.
+	 * Accept it without inventing access isolation; LSM sees the original
+	 * request, not a silently widened protection mask. */
 	if ((flags & ~(MAP_PRIVATE | advisory_flags)) ||
-	    (prot != PROT_READ && prot != (PROT_READ | PROT_WRITE)))
+	    !prot || (prot & ~(PROT_READ | PROT_WRITE)))
 		return -EINVAL;
 	if (length > 2 * PAGE_SIZE)
 		return -ENOMEM;

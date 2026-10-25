@@ -32,6 +32,8 @@ int main(void)
 	refused(10, 2 * PAGE_SIZE + 1, PROT_READ, MAP_PRIVATE, 0, -ENOMEM);
 	refused(10, PAGE_SIZE, PROT_NONE, MAP_PRIVATE, 0, -EINVAL);
 	refused(10, PAGE_SIZE, PROT_EXEC, MAP_PRIVATE, 0, -EINVAL);
+	refused(10, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE, 0, -EINVAL);
+	refused(10, PAGE_SIZE, 8, MAP_PRIVATE, 0, -EINVAL);
 	refused(10, PAGE_SIZE, PROT_READ, MAP_SHARED, 0, -EINVAL);
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE | MAP_LOCKED, 0, -EINVAL);
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE | MAP_FIXED, 0, -ENOMEM);
@@ -42,6 +44,7 @@ int main(void)
 #endif
 	file.f_mode = 0;
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -EACCES);
+	refused(10, PAGE_SIZE, PROT_WRITE, MAP_PRIVATE, 0, -EACCES);
 	file.f_mode = FMODE_READ;
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -ENODEV);
 	file.f_mode |= FMODE_CAN_READ;
@@ -77,6 +80,8 @@ int main(void)
 	capabilities = 1;
 	security_error = -EPERM;
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -EPERM);
+	refused(10, PAGE_SIZE, PROT_WRITE, MAP_PRIVATE, 0, -EPERM);
+	assert(security_prot == PROT_WRITE);
 	security_error = 0;
 	read_total = 0;
 	assert(wasm_mmap_file(0, 2 * PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, raw_offset(2 * PAGE_SIZE)) == 65536);
@@ -145,6 +150,16 @@ int main(void)
 		unsigned long flags = MAP_PRIVATE | hints[i];
 		assert(wasm_mmap_file(0, PAGE_SIZE, PROT_READ, flags, 10, 0) == 65536);
 		assert(security_flags == flags && last_length == PAGE_SIZE);
+		clean();
+	}
+	/* A readable descriptor is sufficient for a private writable copy.
+	 * The actual LSM arguments must not acquire an extra PROT_READ bit. */
+	for (unsigned int i = 0; i < 2; i++) {
+		unsigned long flags = MAP_PRIVATE | (i ? MAP_POPULATE | MAP_NONBLOCK : 0);
+		read_total = 0;
+		assert(wasm_mmap_file(0, PAGE_SIZE, PROT_WRITE, flags, 10, 0) == 65536);
+		assert(security_prot == PROT_WRITE && security_flags == flags);
+		assert(last_length == PAGE_SIZE);
 		clean();
 	}
 	assert(reserve_copy(2 * PAGE_SIZE) && reserve_copy(2 * PAGE_SIZE));
