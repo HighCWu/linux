@@ -200,6 +200,11 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 		    unsigned long prot, unsigned long flags, long fd,
 		    unsigned long raw_offset)
 {
+	/* Private copies are resident before publication. Population/reservation
+	 * hints need no additional work, and historical executable/deny-write
+	 * hints do not grant execute permission or lock the source file. */
+	const unsigned long advisory_flags = MAP_POPULATE | MAP_NONBLOCK |
+		MAP_NORESERVE | MAP_STACK | MAP_DENYWRITE | MAP_EXECUTABLE;
 	u64 offset = raw_offset;
 	struct file *file;
 	long result;
@@ -209,7 +214,7 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 		return -EINVAL;
 	if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE))
 		return -ENOMEM;
-	if (flags != MAP_PRIVATE ||
+	if ((flags & ~(MAP_PRIVATE | advisory_flags)) ||
 	    (prot != PROT_READ && prot != (PROT_READ | PROT_WRITE)))
 		return -EINVAL;
 	if (length > 2 * PAGE_SIZE)

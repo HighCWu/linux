@@ -33,6 +33,7 @@ int main(void)
 	refused(10, PAGE_SIZE, PROT_NONE, MAP_PRIVATE, 0, -EINVAL);
 	refused(10, PAGE_SIZE, PROT_EXEC, MAP_PRIVATE, 0, -EINVAL);
 	refused(10, PAGE_SIZE, PROT_READ, MAP_SHARED, 0, -EINVAL);
+	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE | MAP_LOCKED, 0, -EINVAL);
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE | MAP_FIXED, 0, -ENOMEM);
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE | MAP_FIXED_NOREPLACE, 0, -ENOMEM);
 	refused(10, PAGE_SIZE, PROT_READ, MAP_PRIVATE, raw_offset(4096), -EINVAL);
@@ -94,6 +95,19 @@ int main(void)
 	assert(wasm_mmap_file(0, 1, PROT_READ | PROT_WRITE, MAP_PRIVATE, 10, raw_offset(2 * PAGE_SIZE)) == 65536);
 	assert(last_length == 7 && last_rounded == PAGE_SIZE);
 	clean();
+	/* Each hint and their combination preserve eager-copy semantics and
+	 * reach the security hook without discarding the caller's flags. */
+	const unsigned long hints[] = { MAP_POPULATE, MAP_NONBLOCK, MAP_NORESERVE,
+		MAP_STACK, MAP_DENYWRITE, MAP_EXECUTABLE,
+		MAP_POPULATE | MAP_NONBLOCK | MAP_NORESERVE | MAP_STACK |
+		MAP_DENYWRITE | MAP_EXECUTABLE };
+	for (unsigned int i = 0; i < sizeof(hints) / sizeof(hints[0]); i++) {
+		read_total = 0;
+		unsigned long flags = MAP_PRIVATE | hints[i];
+		assert(wasm_mmap_file(0, PAGE_SIZE, PROT_READ, flags, 10, 0) == 65536);
+		assert(security_flags == flags && last_length == PAGE_SIZE);
+		clean();
+	}
 	assert(reserve_copy(2 * PAGE_SIZE) && reserve_copy(2 * PAGE_SIZE));
 	int old_reads = reads;
 	assert(wasm_mmap_file(0, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, 0) == -ENOMEM);

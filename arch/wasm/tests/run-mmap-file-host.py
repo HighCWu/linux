@@ -32,6 +32,15 @@ with tempfile.TemporaryDirectory(prefix="wasm-file-mmap-host-") as directory:
             input=shim + "\n" + source + "\n" + checks, text=True, check=True,
         )
         subprocess.run([output], check=True, timeout=15)
+        # Restoring the former exact-flags gate must reject the hint cases.
+        gate = "(flags & ~(MAP_PRIVATE | advisory_flags))"
+        assert source.count(gate) == 1
+        negative = source.replace(gate, "((void)advisory_flags, flags != MAP_PRIVATE)")
+        subprocess.run(command, input=shim + "\n" + negative + "\n" + checks,
+                       text=True, check=True)
+        result = subprocess.run([output], capture_output=True, text=True,
+                                preexec_fn=no_core, timeout=15)
+        assert result.returncode != 0 and "== 65536" in result.stderr, result.stderr
         # Bypass only fatal admission; retain references so this compiles
         # under the same warnings as the positive kernel-function model.
         guard = "fatal_signal_pending(current)"
