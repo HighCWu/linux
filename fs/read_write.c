@@ -29,6 +29,9 @@
 #ifdef CONFIG_WASM
 #include <linux/atomic.h>
 #include <linux/mm.h>
+#ifdef CONFIG_BLOCK
+#include <linux/blkdev.h>
+#endif
 
 #define WASM_DIO_CHUNK (2 * PAGE_SIZE)
 #define WASM_DIO_BUDGET (8 * PAGE_SIZE)
@@ -36,7 +39,7 @@ static atomic_t wasm_dio_reserved = ATOMIC_INIT(0);
 
 /* User offsets in a separate Wasm memory cannot be pinned as kernel pages.
  * Submit a bounded kernel iterator to the original filesystem instead. Only
- * synchronous ordinary-file calls reach this helper; no completion callback
+ * synchronous ordinary-file and block-device calls reach this helper; no callback
  * may retain the bounce storage after the filesystem returns. */
 static ssize_t wasm_sync_direct_io(struct kiocb *iocb, struct iov_iter *iter,
 				  bool write)
@@ -45,7 +48,7 @@ static ssize_t wasm_sync_direct_io(struct kiocb *iocb, struct iov_iter *iter,
 	struct kvec vector;
 	unsigned long offset = iov_iter_alignment(iter) & (PAGE_SIZE - 1);
 	size_t count = min_t(size_t, iov_iter_count(iter), WASM_DIO_CHUNK);
-	size_t charge = PAGE_ALIGN(count + offset);
+	size_t charge;
 	void *storage;
 	int used;
 	ssize_t ret;
@@ -55,6 +58,34 @@ static ssize_t wasm_sync_direct_io(struct kiocb *iocb, struct iov_iter *iter,
 	/* Do not split an atomic request or promise polling completion. */
 	if (iocb->ki_flags & (IOCB_ATOMIC | IOCB_HIPRI))
 		return -EOPNOTSUPP;
+#ifdef CONFIG_BLOCK
+	if (S_ISBLK(file_inode(iocb->ki_filp)->i_mode)) {
+		struct block_device *bdev = I_BDEV(iocb->ki_filp->f_mapping->host);
+		unsigned int mask = bdev_logical_block_size(bdev) - 1;
+		loff_t end = bdev_nr_bytes(bdev);
+		u64 length;
+
+		/* The block path validates total length, not buffer alignment.
+		 * Keep the original full-request check before shortening the iter;
+		 * a bounce-address offset cannot stand in for this requirement. */
+		if (iocb->ki_pos < 0)
+			return -EINVAL;
+		/* Let the original method return EOF/ENOSPC in its own order.
+		 * Neither method reaches page extraction beyond the device end. */
+		if (iocb->ki_pos >= end)
+			return write ? iocb->ki_filp->f_op->write_iter(iocb, iter) :
+				       iocb->ki_filp->f_op->read_iter(iocb, iter);
+		/* blkdev_read/write_iter clip at the device end before testing
+		 * alignment. Do not reject a valid aligned prefix or copy a user
+		 * tail which that native request would never touch. */
+		length = min_t(u64, iov_iter_count(iter), end - iocb->ki_pos);
+		if ((iocb->ki_pos | length) & mask)
+			return -EINVAL;
+		count = min_t(size_t, length, WASM_DIO_CHUNK);
+		offset = 0;
+	}
+#endif
+	charge = PAGE_ALIGN(count + offset);
 	used = atomic_read(&wasm_dio_reserved);
 	do {
 		if ((size_t)used > WASM_DIO_BUDGET - charge)
@@ -65,9 +96,10 @@ static ssize_t wasm_sync_direct_io(struct kiocb *iocb, struct iov_iter *iter,
 		ret = -ENOMEM;
 		goto unreserve;
 	}
-	/* Preserve the original iterator's alignment through PAGE_SIZE, including
+	/* Preserve regular-file iterator alignment through PAGE_SIZE, including
 	 * its full count and every segment. A short chunk must not turn an
-	 * originally unaligned request into an aligned filesystem request. */
+	 * originally unaligned request into an aligned filesystem request.
+	 * Block requests were validated separately and use aligned storage. */
 	vector.iov_base = storage + offset;
 	vector.iov_len = count;
 	if (write) {
@@ -108,7 +140,9 @@ static ssize_t call_sync_iter(struct kiocb *iocb, struct iov_iter *iter,
 {
 #ifdef CONFIG_WASM
 	if ((iocb->ki_flags & IOCB_DIRECT) && user_backed_iter(iter) &&
-	    iov_iter_count(iter) && S_ISREG(file_inode(iocb->ki_filp)->i_mode))
+	    iov_iter_count(iter) &&
+	    (S_ISREG(file_inode(iocb->ki_filp)->i_mode) ||
+	     S_ISBLK(file_inode(iocb->ki_filp)->i_mode)))
 		return wasm_sync_direct_io(iocb, iter, write);
 #endif
 	return write ? iocb->ki_filp->f_op->write_iter(iocb, iter) :
