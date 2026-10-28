@@ -58,6 +58,29 @@ static ssize_t wasm_sync_direct_io(struct kiocb *iocb, struct iov_iter *iter,
 	/* Do not split an atomic request or promise polling completion. */
 	if (iocb->ki_flags & (IOCB_ATOMIC | IOCB_HIPRI))
 		return -EOPNOTSUPP;
+	if (write && S_ISREG(file_inode(iocb->ki_filp)->i_mode)) {
+		struct file *file = iocb->ki_filp;
+		struct inode *inode = file->f_mapping->host;
+		loff_t position = iocb->ki_flags & IOCB_APPEND ?
+				i_size_read(inode) : iocb->ki_pos;
+		loff_t bound = file->f_flags & O_LARGEFILE ?
+			     inode->i_sb->s_maxbytes : MAX_NON_LFS;
+		loff_t limit = rlimit(RLIMIT_FSIZE);
+
+		/* Snapshot the common generic_write_check_limits() bounds without
+		 * changing ki_pos, issuing SIGXFSZ, or bypassing the filesystem's
+		 * own checks and locks. Do not read an unused, possibly invalid
+		 * user tail before that native write is shortened by its limits. */
+		if (limit != RLIM_INFINITY)
+			bound = min_t(loff_t, bound, limit);
+		if (position < 0 || position >= bound)
+			return file->f_op->write_iter(iocb, iter);
+		source = *iter;
+		iov_iter_truncate(&source, min_t(u64, iov_iter_count(iter),
+					      bound - position));
+		count = min_t(size_t, iov_iter_count(&source), WASM_DIO_CHUNK);
+		offset = iov_iter_alignment(&source) & (PAGE_SIZE - 1);
+	}
 #ifdef CONFIG_BLOCK
 	if (S_ISBLK(file_inode(iocb->ki_filp)->i_mode)) {
 		struct block_device *bdev = I_BDEV(iocb->ki_filp->f_mapping->host);
