@@ -26,6 +26,95 @@
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
 
+#ifdef CONFIG_WASM
+#include <linux/atomic.h>
+#include <linux/mm.h>
+
+#define WASM_DIO_CHUNK (2 * PAGE_SIZE)
+#define WASM_DIO_BUDGET (8 * PAGE_SIZE)
+static atomic_t wasm_dio_reserved = ATOMIC_INIT(0);
+
+/* User offsets in a separate Wasm memory cannot be pinned as kernel pages.
+ * Submit a bounded kernel iterator to the original filesystem instead. Only
+ * synchronous ordinary-file calls reach this helper; no completion callback
+ * may retain the bounce storage after the filesystem returns. */
+static ssize_t wasm_sync_direct_io(struct kiocb *iocb, struct iov_iter *iter,
+				  bool write)
+{
+	struct iov_iter bounce_iter, source;
+	struct kvec vector;
+	unsigned long offset = iov_iter_alignment(iter) & (PAGE_SIZE - 1);
+	size_t count = min_t(size_t, iov_iter_count(iter), WASM_DIO_CHUNK);
+	size_t charge = PAGE_ALIGN(count + offset);
+	void *storage;
+	int used;
+	ssize_t ret;
+
+	if (iocb->ki_flags & IOCB_NOWAIT)
+		return -EAGAIN;
+	/* Do not split an atomic request or promise polling completion. */
+	if (iocb->ki_flags & (IOCB_ATOMIC | IOCB_HIPRI))
+		return -EOPNOTSUPP;
+	used = atomic_read(&wasm_dio_reserved);
+	do {
+		if ((size_t)used > WASM_DIO_BUDGET - charge)
+			return -ENOMEM;
+	} while (!atomic_try_cmpxchg(&wasm_dio_reserved, &used, used + charge));
+	storage = alloc_pages_exact(charge, GFP_KERNEL | __GFP_ZERO);
+	if (!storage) {
+		ret = -ENOMEM;
+		goto unreserve;
+	}
+	/* Preserve the original iterator's alignment through PAGE_SIZE, including
+	 * its full count and every segment. A short chunk must not turn an
+	 * originally unaligned request into an aligned filesystem request. */
+	vector.iov_base = storage + offset;
+	vector.iov_len = count;
+	if (write) {
+		source = *iter;
+		if (!copy_from_iter_full(vector.iov_base, count, &source)) {
+			ret = -EFAULT;
+			goto free;
+		}
+	}
+	iov_iter_kvec(&bounce_iter, write ? ITER_SOURCE : ITER_DEST,
+		      &vector, 1, count);
+	ret = write ? iocb->ki_filp->f_op->write_iter(iocb, &bounce_iter) :
+		      iocb->ki_filp->f_op->read_iter(iocb, &bounce_iter);
+	BUG_ON(ret == -EIOCBQUEUED);
+	if (ret > 0) {
+		BUG_ON((size_t)ret > count);
+		if (write) {
+			iov_iter_advance(iter, ret);
+		} else {
+			size_t copied = copy_to_iter(vector.iov_base, ret, iter);
+
+			/* The disk read may already have completed, but file position
+			 * and the user iterator must reflect only delivered bytes. */
+			iocb->ki_pos -= ret - copied;
+			ret = copied ? (ssize_t)copied : -EFAULT;
+		}
+	}
+free:
+	free_pages_exact(storage, charge);
+unreserve:
+	atomic_sub(charge, &wasm_dio_reserved);
+	return ret;
+}
+#endif
+
+static ssize_t call_sync_iter(struct kiocb *iocb, struct iov_iter *iter,
+			      bool write)
+{
+#ifdef CONFIG_WASM
+	if ((iocb->ki_flags & IOCB_DIRECT) && user_backed_iter(iter) &&
+	    iov_iter_count(iter) && S_ISREG(file_inode(iocb->ki_filp)->i_mode))
+		return wasm_sync_direct_io(iocb, iter, write);
+#endif
+	return write ? iocb->ki_filp->f_op->write_iter(iocb, iter) :
+		       iocb->ki_filp->f_op->read_iter(iocb, iter);
+}
+
 const struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
 	.read_iter	= generic_file_read_iter,
@@ -490,7 +579,7 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 	kiocb.ki_pos = (ppos ? *ppos : 0);
 	iov_iter_ubuf(&iter, ITER_DEST, buf, len);
 
-	ret = filp->f_op->read_iter(&kiocb, &iter);
+	ret = call_sync_iter(&kiocb, &iter, false);
 	BUG_ON(ret == -EIOCBQUEUED);
 	if (ppos)
 		*ppos = kiocb.ki_pos;
@@ -592,7 +681,7 @@ static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t 
 	kiocb.ki_pos = (ppos ? *ppos : 0);
 	iov_iter_ubuf(&iter, ITER_SOURCE, (void __user *)buf, len);
 
-	ret = filp->f_op->write_iter(&kiocb, &iter);
+	ret = call_sync_iter(&kiocb, &iter, true);
 	BUG_ON(ret == -EIOCBQUEUED);
 	if (ret > 0 && ppos)
 		*ppos = kiocb.ki_pos;
@@ -823,10 +912,7 @@ static ssize_t do_iter_readv_writev(struct file *filp, struct iov_iter *iter,
 		return ret;
 	kiocb.ki_pos = (ppos ? *ppos : 0);
 
-	if (type == READ)
-		ret = filp->f_op->read_iter(&kiocb, iter);
-	else
-		ret = filp->f_op->write_iter(&kiocb, iter);
+	ret = call_sync_iter(&kiocb, iter, type == WRITE);
 	BUG_ON(ret == -EIOCBQUEUED);
 	if (ppos)
 		*ppos = kiocb.ki_pos;
