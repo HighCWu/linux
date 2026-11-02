@@ -10,6 +10,8 @@
 #include <linux/slab.h>
 #include <linux/limits.h>
 #include <linux/kdev_t.h>
+#include <linux/stat.h>
+#include <linux/fcntl.h>
 #include <linux/rcupdate.h>
 #include <linux/sched/signal.h>
 #include <linux/time64.h>
@@ -363,6 +365,7 @@ int wasm_dynamic_file_pin_v1(int fd, u64 device, u64 inode)
 	struct mm_struct *mm = current->mm;
 	struct wasm_dynamic_file *pin;
 	struct file *file;
+	struct kstat status;
 	int result;
 
 	if (!mm || READ_ONCE(current_thread_info()->context_mm) != mm)
@@ -374,8 +377,15 @@ int wasm_dynamic_file_pin_v1(int fd, u64 device, u64 inode)
 		fput(file);
 		return -EACCES;
 	}
-	if (huge_encode_dev(file_inode(file)->i_sb->s_dev) != device ||
-	    file_inode(file)->i_ino != inode) {
+	/* Match the process's fstat identity, including filesystem getattr
+	 * translations (e.g. overlayfs), rather than raw inode/superblock fields. */
+	result = vfs_getattr(&file->f_path, &status, STATX_INO,
+			     AT_STATX_SYNC_AS_STAT);
+	if (result) {
+		fput(file);
+		return result;
+	}
+	if (huge_encode_dev(status.dev) != device || status.ino != inode) {
 		fput(file);
 		return -ESTALE;
 	}
