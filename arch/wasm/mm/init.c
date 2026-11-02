@@ -34,6 +34,10 @@ int wasm_init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 	mm->context.remote.request = NULL;
 	mm->context.remote.accepting = true;
 	mm->context.exec_args = NULL;
+	/* Dynamic module publication/fork is not supported by the execution ABI. */
+	mm->context.dynamic_files = NULL;
+	mm->context.dynamic_file_count = 0;
+	mm->context.dynamic_file_next = 0;
 	return 0;
 }
 
@@ -44,6 +48,7 @@ void wasm_destroy_context(struct mm_struct *mm)
 	WARN_ON_ONCE(atomic_read(&mm->context.remote.state) !=
 		     WASM_REMOTE_IDLE);
 	WARN_ON_ONCE(mm->context.remote.request);
+	WARN_ON_ONCE(mm->context.dynamic_files);
 }
 
 void __init arch_zone_limits_init(unsigned long *max_zone_pfn)

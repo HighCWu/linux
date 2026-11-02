@@ -9,6 +9,7 @@
 
 struct wasm_exec_args;
 struct wasm_remote_request;
+struct wasm_dynamic_file;
 
 enum wasm_remote_state {
 	WASM_REMOTE_IDLE,
@@ -44,6 +45,10 @@ typedef struct {
 
 	/* Owned by the new mm between exec and the userspace startup call. */
 	struct wasm_exec_args *exec_args;
+	/* Private execution references, not user fd-table entries or mappings. */
+	struct wasm_dynamic_file *dynamic_files;
+	unsigned int dynamic_file_count;
+	int dynamic_file_next;
 } mm_context_t;
 
 #endif /* !__ASSEMBLY__ */

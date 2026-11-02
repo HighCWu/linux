@@ -5,6 +5,11 @@
 #include <asm/thread_info.h>
 #include <asm/wasm_imports.h>
 #include <linux/mm.h>
+#include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/slab.h>
+#include <linux/limits.h>
+#include <linux/kdev_t.h>
 #include <linux/rcupdate.h>
 #include <linux/sched/signal.h>
 #include <linux/time64.h>
@@ -12,6 +17,8 @@
 
 #define WASM_REMOTE_WAIT_CHUNK_NS	NSEC_PER_SEC
 #define WASM_REMOTE_WAIT_TIMEOUT_NS	(5ULL * NSEC_PER_SEC)
+
+static void release_dynamic_files(struct mm_struct *mm);
 
 struct wasm_remote_request {
 	struct mm_struct *mm;
@@ -323,4 +330,123 @@ void wasm_remote_mm_shutdown(struct mm_struct *mm)
 	if (slot->host_id)
 		wasm_remote_memory_v1_release(slot->host_id);
 	mutex_unlock(&slot->mutex);
+	release_dynamic_files(mm);
 }
+
+/* WASM_DYNAMIC_FILE_REFS_BEGIN
+ * A compiled Wasm library has no executable VMA. Keep its source file alive so
+ * device/inode identities cannot be recycled underneath resident loader state.
+ * These are mm-owned fget references, never visible or closeable as user fds.
+ * The host supplies an fd obtained by the process's normal Linux open/read path.
+ */
+struct wasm_dynamic_file {
+	struct wasm_dynamic_file *next;
+	struct file *file;
+	int id;
+};
+
+#ifdef __wasm__
+#define DYNAMIC_EXPORT(name) __attribute__((export_name(name)))
+#else
+#define DYNAMIC_EXPORT(name)
+#endif
+
+DYNAMIC_EXPORT("dynamic_file_pin_abi_v1")
+int wasm_dynamic_file_pin_abi_v1(void)
+{
+	return 1;
+}
+
+DYNAMIC_EXPORT("dynamic_file_pin_v1")
+int wasm_dynamic_file_pin_v1(int fd, u64 device, u64 inode)
+{
+	struct mm_struct *mm = current->mm;
+	struct wasm_dynamic_file *pin;
+	struct file *file;
+	int result;
+
+	if (!mm || READ_ONCE(current_thread_info()->context_mm) != mm)
+		return -EAGAIN;
+	file = fget(fd);
+	if (!file)
+		return -EBADF;
+	if (!(file->f_mode & FMODE_READ) || !S_ISREG(file_inode(file)->i_mode)) {
+		fput(file);
+		return -EACCES;
+	}
+	if (huge_encode_dev(file_inode(file)->i_sb->s_dev) != device ||
+	    file_inode(file)->i_ino != inode) {
+		fput(file);
+		return -ESTALE;
+	}
+	pin = kmalloc(sizeof(*pin), GFP_KERNEL);
+	if (!pin) {
+		fput(file);
+		return -ENOMEM;
+	}
+	mutex_lock(&mm->context.remote.mutex);
+	if (!mm->context.remote.accepting) {
+		result = -ESRCH;
+	} else if (mm->context.dynamic_file_count >= 1024 ||
+		   mm->context.dynamic_file_next == INT_MAX) {
+		result = -ENOSPC;
+	} else {
+		pin->file = file;
+		pin->id = ++mm->context.dynamic_file_next;
+		pin->next = mm->context.dynamic_files;
+		mm->context.dynamic_files = pin;
+		mm->context.dynamic_file_count++;
+		result = pin->id;
+	}
+	mutex_unlock(&mm->context.remote.mutex);
+	if (result < 0) {
+		fput(file);
+		kfree(pin);
+	}
+	return result;
+}
+
+DYNAMIC_EXPORT("dynamic_file_unpin_v1")
+int wasm_dynamic_file_unpin_v1(int id)
+{
+	struct mm_struct *mm = current->mm;
+	struct wasm_dynamic_file **link, *pin = NULL;
+
+	if (!mm || READ_ONCE(current_thread_info()->context_mm) != mm)
+		return -EAGAIN;
+	mutex_lock(&mm->context.remote.mutex);
+	for (link = &mm->context.dynamic_files; *link; link = &(*link)->next) {
+		if ((*link)->id != id)
+			continue;
+		pin = *link;
+		*link = pin->next;
+		mm->context.dynamic_file_count--;
+		break;
+	}
+	mutex_unlock(&mm->context.remote.mutex);
+	if (!pin)
+		return -ENOENT;
+	fput(pin->file);
+	kfree(pin);
+	return 0;
+}
+
+static void release_dynamic_files(struct mm_struct *mm)
+{
+	struct wasm_dynamic_file *pin;
+
+	mutex_lock(&mm->context.remote.mutex);
+	pin = mm->context.dynamic_files;
+	mm->context.dynamic_files = NULL;
+	mm->context.dynamic_file_count = 0;
+	mutex_unlock(&mm->context.remote.mutex);
+	while (pin) {
+		struct wasm_dynamic_file *next = pin->next;
+
+		fput(pin->file);
+		kfree(pin);
+		pin = next;
+	}
+}
+#undef DYNAMIC_EXPORT
+/* WASM_DYNAMIC_FILE_REFS_END */
