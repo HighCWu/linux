@@ -14,8 +14,8 @@ endif
 
 WASM_FEATURES = -matomics -mbulk-memory -mextended-const -mmultivalue -mmutable-globals -mnontrapping-fptoint -mreference-types -msign-ext -msimd128
 
-cflags-y += $(wasm-abi-flags) -Wno-incompatible-library-redeclaration -D__DISABLE_EXPORTS '-D__builtin_return_address=wasm_kernel_return_address' $(WASM_FEATURES) -mllvm -wasm-enable-sjlj
-aflags-y += $(wasm-abi-flags) -D__DISABLE_EXPORTS
+cflags-y += $(wasm-abi-flags) -Wno-incompatible-library-redeclaration '-D__builtin_return_address=wasm_kernel_return_address' $(WASM_FEATURES) -mllvm -wasm-enable-sjlj
+aflags-y += $(wasm-abi-flags)
 ldflags-y += $(wasm-ld-emulation) --import-memory --max-memory=$(wasm-max-memory) --shared-memory --no-merge-data-segments --export-table --export=__stack_pointer
 
 KBUILD_CFLAGS += $(cflags-y)

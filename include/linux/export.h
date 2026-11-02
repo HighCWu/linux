@@ -38,7 +38,11 @@
 		__EXPORT_SYMBOL_REF(sym)	ASM_NL	\
 	.previous
 
-#if defined(__DISABLE_EXPORTS)
+/* Wasm has no ELF module export records. Keep this policy here, rather
+ * than defining __DISABLE_EXPORTS for the entire kernel: library code
+ * also uses that macro to select a reduced pre-boot implementation.
+ */
+#if defined(__DISABLE_EXPORTS) || defined(CONFIG_WASM)
 
 /*
  * Allow symbol exports to be disabled completely so that C code may
