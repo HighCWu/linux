@@ -10,6 +10,16 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+#include <string.h>
+#define __user
+static bool stream_enabled, cancel_during_read;
+static int wasm_populate_file_mmap_v1(void *, unsigned long);
+static void stream_producer_check(void);
+static bool access_ok(const void *p, unsigned long length) { return p && length <= 16 * 1024 * 1024; }
+static void wasm_timer_check(void) { }
+static void cond_resched(void) { }
+#endif
 
 typedef uint64_t u64;
 typedef unsigned char u8;
@@ -92,13 +102,17 @@ static void kfree(void *buffer) { assert(allocations > 0); allocations--; free(b
 static ssize_t kernel_read(struct file *f, void *buffer, size_t length, loff_t *position) {
 	assert(f == &file && pins == 1 && length > 0);
 	reads++;
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+	if (stream_enabled) stream_producer_check();
+	if (read_mode == 5 && read_total) return -EIO;
+#endif
 	if (!read_total) first_offset = *position;
 	if (read_mode == 3) return -EINTR;
 	if (read_mode == 4) return 0;
 	if ((read_mode == 1 || read_mode == 2) && read_total) return read_mode == 1 ? 0 : -EIO;
 	if (*position >= f->inode->size) return 0;
 	if (length > (size_t)(f->inode->size - *position)) length = f->inode->size - *position;
-	if (read_mode) length = 7;
+	if (read_mode && read_mode != 5) length = 7;
 	for (size_t i = 0; i < length; i++) ((u8 *)buffer)[i] = (u8)((*position + i) * 37 + 11);
 	*position += length;
 	read_total += length;
@@ -113,3 +127,28 @@ static long wasm_user_mmap_init_v1_map(unsigned long rounded, const void *source
 	last_rounded = rounded;
 	return copy_error ? copy_error : 65536;
 }
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+static unsigned int wasm_user_mmap_stream_v1_capabilities(void) { return stream_enabled; }
+static unsigned long copy_to_user(void *to, const void *from, unsigned long length) {
+	if (copy_error) return length;
+	memcpy(to, from, length);
+	return 0;
+}
+static long wasm_user_mmap_stream_v1_map(unsigned long rounded) {
+	assert(pins == 1 && allocations == 2);
+	unsigned char *candidate = calloc(rounded, 1);
+	assert(candidate);
+	bool cancelled = cancel_during_read;
+	copies++;
+	int result = wasm_populate_file_mmap_v1(candidate, rounded);
+	if (!result) {
+		for (unsigned long i = 0; i < rounded; i++)
+			assert(candidate[i] == (i < read_total ? (u8)((first_offset + i) * 37 + 11) : 0));
+	} else if (cancelled || fatal_after_read) {
+		for (unsigned long i = 0; i < rounded; i++) assert(!candidate[i]);
+	}
+	assert(wasm_populate_file_mmap_v1(candidate, rounded) == -EPERM);
+	free(candidate);
+	return result ? result : 65536;
+}
+#endif

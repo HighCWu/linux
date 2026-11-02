@@ -25,6 +25,22 @@ static void refused(long fd, unsigned long length, unsigned long prot,
 	clean();
 }
 
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+static void stream_producer_check(void)
+{
+	assert(task.info.mmap_callbacks && task.info.mmap_callbacks->reading);
+	if (cancel_during_read) {
+		wasm_abort_file_mmap_v1();
+		/* Producer has not returned. It still owns staging and its file,
+		 * even though cancellation has closed publication admission.
+		 */
+		assert(allocations == 2 && pins == 1);
+		assert(wasm_mmap_copy_stat(3) == 2 * PAGE_SIZE);
+		cancel_during_read = false;
+	}
+}
+#endif
+
 int main(void)
 {
 	refused(-1, PAGE_SIZE, PROT_READ, MAP_PRIVATE, 0, -EBADF);
@@ -187,6 +203,29 @@ int main(void)
 	clean();
 #ifdef CONFIG_WASM_MMAP_COPY_TEST
 	assert(wasm_mmap_copy_stat(0x100) == copies);
+#endif
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+	stream_enabled = true;
+	inode.size = 4 * PAGE_SIZE + 7;
+	read_total = 0;
+	assert(wasm_mmap_file(0, 8 * PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, raw_offset(PAGE_SIZE)) == 65536);
+	assert(read_total == 3 * PAGE_SIZE + 7);
+	clean();
+	for (int phase = 0; phase < 4; phase++) {
+		read_total = 0;
+		read_mode = phase == 0 ? 5 : 0;
+		copy_error = phase == 1 ? -EFAULT : 0;
+		fatal_after_read = phase == 2;
+		cancel_during_read = phase == 3;
+		assert(wasm_mmap_file(0, 8 * PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, 0) ==
+		       (phase == 0 ? -EIO : phase == 1 ? -EFAULT : -EINTR));
+		clean();
+		fatal_pending = fatal_after_read = false;
+	}
+	read_mode = copy_error = 0;
+	read_total = 0;
+	assert(wasm_mmap_file(0, 8 * PAGE_SIZE, PROT_READ, MAP_PRIVATE, 10, 0) == 65536);
+	clean();
 #endif
 	return 0;
 }

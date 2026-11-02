@@ -62,10 +62,13 @@ with tempfile.TemporaryDirectory(prefix="wasm-file-mmap-host-") as directory:
         # Bypass only fatal admission; retain references so this compiles
         # under the same warnings as the positive kernel-function model.
         guard = "fatal_signal_pending(current)"
-        assert source.count(guard) == 2
+        start = source.index("static long copy_file(")
+        end = source.index("\nlong wasm_mmap_copy_file(", start)
+        eager = source[start:end]
+        assert eager.count(guard) == 2
         for index in (0, 1):
-            before, after = source.split(guard, 1) if index == 0 else source.rsplit(guard, 1)
-            negative = before + "(false && fatal_signal_pending(current))" + after
+            before, after = eager.split(guard, 1) if index == 0 else eager.rsplit(guard, 1)
+            negative = source[:start] + before + "(false && fatal_signal_pending(current))" + after + source[end:]
             subprocess.run(command, input=shim + "\n" + negative + "\n" + checks,
                            text=True, check=True)
             result = subprocess.run([output], capture_output=True, text=True,
@@ -73,3 +76,13 @@ with tempfile.TemporaryDirectory(prefix="wasm-file-mmap-host-") as directory:
             expected = "reads == reads_before" if index == 0 else "-EINTR"
             assert result.returncode != 0 and expected in result.stderr, result.stderr
         print(f"host shims: mmap{'2 units' if bits == 32 else ' bytes'} passed", flush=True)
+        subprocess.run([*command, "-DCONFIG_WASM_FILE_MMAP_STREAM=1"],
+                       input=shim + "\n" + source + "\n" + checks, text=True, check=True)
+        subprocess.run([output], check=True, timeout=15)
+        guard = "if (callback->reading)"
+        assert source.count(guard) == 1
+        negative = source.replace(guard, "if (false && callback->reading)")
+        subprocess.run([*command, "-DCONFIG_WASM_FILE_MMAP_STREAM=1"],
+                       input=shim + "\n" + negative + "\n" + checks, text=True, check=True)
+        result = subprocess.run([output], capture_output=True, text=True, preexec_fn=no_core, timeout=15)
+        assert result.returncode != 0 and "allocations == 2 && pins == 1" in result.stderr, result.stderr

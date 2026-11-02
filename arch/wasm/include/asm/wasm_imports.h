@@ -120,6 +120,12 @@ long wasm_import(user_mmap_init_v1, map)(unsigned long rounded,
  * A capability never authorizes a file source or promises page protection. */
 unsigned int wasm_import(user_mmap_init_v1, capabilities)(void);
 
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+/* Kernel/host only. The existing user initializer still grants one copy. */
+unsigned int wasm_import(user_mmap_stream_v1, capabilities)(void);
+long wasm_import(user_mmap_stream_v1, map)(unsigned long rounded);
+#endif
+
 #ifdef CONFIG_VIRTIO_WASM
 void wasm_import(virtio, set_features)(u32 id, u64 features);
 

@@ -73,6 +73,16 @@ config WASM_FILE_MMAP
 	  semantics: writes are not trapped. No executable/shared/fixed mappings.
 	  This is not a supported release configuration. Say N for release kernels.
 
+config WASM_FILE_MMAP_STREAM
+	bool "Experimental chunked private file mmap"
+	depends on WASM_FILE_MMAP
+	default n
+	help
+	  Populate fresh user backing with bounded synchronous VFS reads instead
+	  of staging the whole file. Requires the matching host execution bridge.
+	  No shared mappings, page protection or executable code loading.
+	  Keep disabled for release kernels until lifecycle validation completes.
+
 config EARLY_PRINTK
 	def_bool y
 

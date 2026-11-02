@@ -19,6 +19,9 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 #ifdef CONFIG_WASM_FILE_COPY_CORE
 void wasm_mmap_copy_abort_task(struct task_struct *task);
 void wasm_abort_file_mmap_v1(void);
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+int wasm_populate_file_mmap_v1(void __user *destination, unsigned long rounded);
+#endif
 #else
 static inline void wasm_mmap_copy_abort_task(struct task_struct *task) { }
 #endif

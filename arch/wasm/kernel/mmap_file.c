@@ -9,6 +9,8 @@
 #include <linux/security.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <asm/irq.h>
 #include <asm/mmap_file.h>
 #include <asm/virtio_snapshot.h>
 #include <asm/wasm_imports.h>
@@ -27,13 +29,31 @@ struct wasm_mmap_callback {
 	struct file *file;
 	void *staging;
 	unsigned long rounded;
+	unsigned long charge;
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+	loff_t position;
+	bool stream;
+	bool used;
+	bool reading;
+	bool aborted;
+#endif
 };
 
 static void release_callback(struct wasm_mmap_callback *callback)
 {
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+	/* A kernel/host trap inside a producer is fatal to this machine. Retain
+	 * unjoined storage under its bounded reservation until machine teardown,
+	 * rather than recycling bytes an in-flight producer might still touch.
+	 */
+	if (callback->reading) {
+		callback->aborted = true;
+		return;
+	}
+#endif
 	kfree(callback->staging);
 	atomic_dec(&copy_staging);
-	atomic_sub(2 * callback->rounded, &copy_reserved);
+	atomic_sub(callback->charge, &copy_reserved);
 	atomic_dec(&copy_requests);
 	fput(callback->file);
 	kfree(callback);
@@ -184,6 +204,12 @@ static long copy_file(struct file *file, unsigned long length,
 	callback->file = file;
 	callback->staging = staging;
 	callback->rounded = rounded;
+	callback->charge = 2 * rounded;
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+	callback->stream = false;
+	callback->reading = false;
+	callback->aborted = false;
+#endif
 	callback->next = info->mmap_callbacks;
 	info->mmap_callbacks = callback;
 #ifdef CONFIG_WASM_MMAP_COPY_TEST
@@ -211,6 +237,112 @@ long wasm_mmap_copy_file(struct file *file, unsigned long length,
 	return copy_file(file, length, offset, size, true);
 }
 
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+/* Called once by the host while the existing user initializer owns fresh,
+ * zeroed, unpublished backing. Retain the file, staging and task callback
+ * until every synchronous kernel_read has returned. No fd is re-looked up.
+ */
+#ifdef __wasm__
+__attribute__((export_name("populate_file_mmap_v1")))
+#endif
+int wasm_populate_file_mmap_v1(void __user *destination, unsigned long rounded)
+{
+	struct wasm_mmap_callback *callback =
+		task_thread_info(current)->mmap_callbacks;
+	unsigned long done = 0;
+
+	if (!callback || !callback->stream || callback->used)
+		return -EPERM;
+	callback->used = true;
+	if (rounded != callback->rounded || !destination ||
+	    !access_ok(destination, rounded))
+		return -EFAULT;
+	while (done < rounded) {
+		size_t count = min_t(unsigned long, PAGE_SIZE, rounded - done);
+		ssize_t read;
+
+		if (callback->aborted || fatal_signal_pending(current))
+			return -EINTR;
+		callback->reading = true;
+		read = kernel_read(callback->file, callback->staging, count,
+				   &callback->position);
+		callback->reading = false;
+		/* A producer may have slept. Never initialize more user bytes
+		 * after a fatal signal became visible while it owned staging.
+		 */
+		if (callback->aborted || fatal_signal_pending(current))
+			return -EINTR;
+		if (read < 0)
+			return read;
+		if (!read)
+			break;
+		if (copy_to_user((char __user *)destination + done,
+				 callback->staging, read))
+			return -EFAULT;
+		done += read;
+		/* Like the existing NOMMU copy, a short read leaves a zero tail. */
+		if (read < count)
+			break;
+		wasm_timer_check();
+		cond_resched();
+	}
+	return callback->aborted || fatal_signal_pending(current) ? -EINTR : 0;
+}
+
+static long stream_file(struct file *file, unsigned long rounded, u64 offset)
+{
+	struct thread_info *info = task_thread_info(current);
+	struct wasm_mmap_callback *callback;
+	void *staging;
+	long result = -ENOMEM;
+
+	atomic_inc(&copy_requests);
+	if (fatal_signal_pending(current)) {
+		result = -EINTR;
+		goto out;
+	}
+	/* Two pages bound kernel staging plus metadata. Unlike the old eager
+	 * budget this does not charge the entire user candidate: its allocation
+	 * is bounded by the process's direct linear-memory capacity.
+	 */
+	if (!reserve_copy(PAGE_SIZE))
+		goto out;
+	staging = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!staging)
+		goto unreserve;
+	atomic_inc(&copy_staging);
+	callback = kmalloc(sizeof(*callback), GFP_KERNEL);
+	if (!callback)
+		goto free;
+	*callback = (struct wasm_mmap_callback) {
+		.next = info->mmap_callbacks, .file = file, .staging = staging,
+		.rounded = rounded, .charge = 2 * PAGE_SIZE,
+		.position = offset, .stream = true,
+	};
+	info->mmap_callbacks = callback;
+	if (fatal_signal_pending(current)) {
+		result = -EINTR;
+	} else {
+#ifdef CONFIG_WASM_MMAP_COPY_TEST
+		atomic_inc(&copy_callback_attempts);
+#endif
+		result = wasm_user_mmap_stream_v1_map(rounded);
+	}
+	info->mmap_callbacks = callback->next;
+	release_callback(callback);
+	return result;
+free:
+	kfree(staging);
+	atomic_dec(&copy_staging);
+unreserve:
+	atomic_sub(2 * PAGE_SIZE, &copy_reserved);
+out:
+	atomic_dec(&copy_requests);
+	fput(file);
+	return result;
+}
+#endif
+
 #ifdef CONFIG_WASM_FILE_MMAP
 /* Standard Linux mmap/mmap2 shape; the versioned bridge carries only a bounded
  * copy, never fd/offset/provenance. NOMMU PROT_READ is not enforced write
@@ -227,6 +359,7 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 	u64 offset = raw_offset;
 	struct file *file;
 	unsigned long capabilities;
+	bool stream = false;
 	long result;
 
 	(void)addr; /* A non-fixed placement hint may be ignored. */
@@ -240,7 +373,12 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 	if ((flags & ~(MAP_PRIVATE | advisory_flags)) ||
 	    !prot || (prot & ~(PROT_READ | PROT_WRITE)))
 		return -EINVAL;
-	if (length > 2 * PAGE_SIZE)
+	if (length > ULONG_MAX - (PAGE_SIZE - 1))
+		return -ENOMEM;
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+	stream = wasm_user_mmap_stream_v1_capabilities() & 1;
+#endif
+	if (!stream && length > 2 * PAGE_SIZE)
 		return -ENOMEM;
 #ifdef CONFIG_32BIT
 	/* mmap2 uses 4096-byte units, not the architecture's 64-KiB page. */
@@ -277,6 +415,10 @@ long wasm_mmap_file(unsigned long addr, unsigned long length,
 	result = security_mmap_file(file, prot, flags);
 	if (result)
 		goto put;
+#ifdef CONFIG_WASM_FILE_MMAP_STREAM
+	if (stream)
+		return stream_file(file, ALIGN(length, PAGE_SIZE), offset);
+#endif
 	return copy_file(file, length, offset, 0, false);
 put:
 	fput(file);
