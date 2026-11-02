@@ -79,6 +79,58 @@ static int algif_skcipher_export(struct sock *sk, struct skcipher_request *req)
 	return err;
 }
 
+/* A linear-memory destination is readable and writable but cannot be pinned
+ * as kernel pages. Validate its existing prefix without changing it, then
+ * submit one owned kernel page to the original synchronous request path.
+ * The probe must not include bytes beyond the queued input, and must not
+ * advance the caller's destination before a successful crypto operation.
+ */
+static int skcipher_prepare_rx(struct msghdr *msg, size_t maxsize,
+			       struct iov_iter *original, struct kvec *vector,
+			       struct page **page)
+{
+	struct iov_iter probe;
+	size_t wanted, copied;
+
+	*page = NULL;
+	if (!IS_ENABLED(CONFIG_WASM) || !user_backed_iter(&msg->msg_iter))
+		return 0;
+	wanted = min_t(size_t, PAGE_SIZE,
+		       min_t(size_t, maxsize, iov_iter_count(&msg->msg_iter)));
+	if (!wanted)
+		return 0;
+	*original = msg->msg_iter;
+	*page = alloc_page(GFP_KERNEL | __GFP_ACCOUNT);
+	if (!*page)
+		return -ENOMEM;
+	probe = *original;
+	probe.data_source = true;
+	copied = copy_page_from_iter(*page, 0, wanted, &probe);
+	if (!copied)
+		return -EFAULT;
+	vector->iov_base = page_address(*page);
+	vector->iov_len = copied;
+	iov_iter_kvec(&msg->msg_iter, ITER_DEST, vector, 1, copied);
+	return 0;
+}
+
+static int skcipher_finish_rx(struct msghdr *msg, struct iov_iter *original,
+			      struct page *page, int result)
+{
+	if (!page)
+		return result;
+	msg->msg_iter = *original;
+	if (result > 0) {
+		size_t copied;
+
+		BUG_ON((size_t)result > PAGE_SIZE);
+		copied = copy_page_to_iter(page, 0, result, &msg->msg_iter);
+		result = copied ? (int)copied : -EFAULT;
+	}
+	put_page(page);
+	return result;
+}
+
 static int _skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
 			     size_t ignored, int flags)
 {
@@ -90,6 +142,9 @@ static int _skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
 	struct crypto_skcipher *tfm = pask->private;
 	unsigned int bs = crypto_skcipher_chunksize(tfm);
 	struct af_alg_async_req *areq;
+	struct page *page = NULL;
+	struct iov_iter original;
+	struct kvec vector;
 	unsigned cflags = 0;
 	int err = 0;
 	size_t len = 0;
@@ -105,6 +160,9 @@ static int _skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
 				     crypto_skcipher_reqsize(tfm));
 	if (IS_ERR(areq))
 		return PTR_ERR(areq);
+	err = skcipher_prepare_rx(msg, ctx->used, &original, &vector, &page);
+	if (err)
+		goto free;
 
 	/* convert iovecs of output buffers into RX SGL */
 	err = af_alg_get_rsgl(sk, msg, flags, areq, ctx->used, &len);
@@ -185,7 +243,7 @@ static int _skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
 free:
 	af_alg_free_resources(areq);
 
-	return err ? err : len;
+	return skcipher_finish_rx(msg, &original, page, err ? err : len);
 }
 
 static int skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
