@@ -243,6 +243,18 @@ static void task_entry(void *args)
 
 int wasm_call_clone_fn(void *arg);
 
+__attribute__((export_name("native_clone3_fork_abi")))
+int wasm_native_clone3_fork_abi(void)
+{
+	return 1;
+}
+
+static int wasm_return_from_clone3(void *entry)
+{
+	wasm_user_switch_entry((uintptr_t)entry, 0);
+	return 0;
+}
+
 /*
  * The host waits for a private-memory snapshot inside copy_thread(), before
  * the child becomes runnable. A long host atomic wait must not monopolize a
@@ -264,6 +276,7 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	char name[TASK_COMM_LEN + 16] = { 0 };
 	int name_len;
 	int ret;
+	uintptr_t entry = 0;
 
 	memset(childregs, 0, sizeof(struct pt_regs));
 
@@ -276,19 +289,32 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	if (args->idle)
 		return 0;
 
+	/* Generic clone3 has no callback function. It returns into a saved user
+	 * continuation, never onto the parent's live Wasm/C stack. Refuse before
+	 * spawning a Worker when the loader cannot supply that continuation. */
+	if (!args->fn) {
+		if (!current->mm || (args->flags & CLONE_VM) ||
+		    atomic_read(&current->mm->mm_users) != 1 ||
+		    args->stack || args->stack_size || (args->flags & CLONE_SETTLS))
+			return -EOPNOTSUPP;
+		entry = wasm_user_fork_v1_entry();
+		if (!entry)
+			return -EOPNOTSUPP;
+	}
+
 	bootstrap_args =
 		kzalloc(sizeof(struct task_bootstrap_args), GFP_KERNEL);
 	if (!bootstrap_args)
 		return -ENOMEM;
-	bootstrap_args->fn = args->fn;
-	bootstrap_args->fn_arg = args->fn_arg;
+	bootstrap_args->fn = entry ? wasm_return_from_clone3 : args->fn;
+	bootstrap_args->fn_arg = entry ? (void *)entry : args->fn_arg;
 	bootstrap_args->task = p;
 	atomic_set(&bootstrap_args->aborted, 0);
 	task_thread_info(p)->bootstrap_args = bootstrap_args;
 
 	name_len = snprintf(name, ARRAY_SIZE(name), "%s (%d)", p->comm, p->pid);
 
-	if (args->fn == wasm_call_clone_fn)
+	if (entry || args->fn == wasm_call_clone_fn)
 		user_memory = args->flags & CLONE_VM ?
 			WASM_USER_MEMORY_SHARE : WASM_USER_MEMORY_COPY;
 	if (user_memory != WASM_USER_MEMORY_NONE)

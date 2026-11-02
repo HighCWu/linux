@@ -55,6 +55,8 @@ void wasm_import(user, compile_abort)(void);
 void wasm_import(user, instantiate)(bool fresh_memory);
 void wasm_import(user, call)(void);
 void wasm_import(user, switch_entry)(uintptr_t fn, uintptr_t arg);
+/* Private execution contract: zero unless a suspended clone3 is in progress. */
+uintptr_t wasm_import(user_fork_v1, entry)(void);
 void wasm_import(user, call_signal_handler)(uintptr_t fn, u32 sig);
 int wasm_import(user, call_siginfo_handler)(uintptr_t trampoline,
 					    uintptr_t fn, u32 sig);
