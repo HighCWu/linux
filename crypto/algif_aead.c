@@ -26,6 +26,7 @@
 #include <crypto/internal/aead.h>
 #include <crypto/scatterwalk.h>
 #include <crypto/if_alg.h>
+#include <crypto/wasm_aead_buffer.h>
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/kernel.h>
@@ -74,6 +75,7 @@ static int _aead_recvmsg(struct socket *sock, struct msghdr *msg,
 	unsigned int as = crypto_aead_authsize(tfm);
 	unsigned int ivsize = crypto_aead_ivsize(tfm);
 	struct af_alg_async_req *areq;
+	struct af_alg_wasm_aead_rx rx;
 	struct scatterlist *rsgl_src, *tsgl_src = NULL;
 	void *iv;
 	int err = 0;
@@ -125,6 +127,11 @@ static int _aead_recvmsg(struct socket *sock, struct msghdr *msg,
 	 */
 	used -= ctx->aead_assoclen;
 
+	/* The Wasm staging buffer is owned by this synchronous call only. */
+	if (IS_ENABLED(CONFIG_WASM) && user_backed_iter(&msg->msg_iter) &&
+	    msg->msg_iocb && !is_sync_kiocb(msg->msg_iocb))
+		return -EOPNOTSUPP;
+
 	/* Allocate cipher request for current operation. */
 	areq = af_alg_alloc_areq(sk, sizeof(struct af_alg_async_req) +
 				     crypto_aead_reqsize(tfm) + ivsize);
@@ -134,6 +141,10 @@ static int _aead_recvmsg(struct socket *sock, struct msghdr *msg,
 	iv = (u8 *)aead_request_ctx(&areq->cra_u.aead_req) +
 	     crypto_aead_reqsize(tfm);
 	memcpy(iv, ctx->iv, ivsize);
+	err = af_alg_wasm_prepare_aead_rx(msg,
+			min_t(size_t, outlen, af_alg_rcvbuf(sk)), &rx);
+	if (err)
+		goto free;
 
 	/* convert iovecs of output buffers into RX SGL */
 	err = af_alg_get_rsgl(sk, msg, flags, areq, outlen, &usedpages);
@@ -232,7 +243,7 @@ static int _aead_recvmsg(struct socket *sock, struct msghdr *msg,
 free:
 	af_alg_free_resources(areq);
 
-	return err ? err : outlen;
+	return af_alg_wasm_finish_aead_rx(msg, &rx, err ? err : outlen);
 }
 
 static int aead_recvmsg(struct socket *sock, struct msghdr *msg,
