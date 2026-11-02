@@ -1,7 +1,25 @@
 #include <linux/init.h>
+#include <linux/limits.h>
 #include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
+
+static atomic_t remote_mm_ids = ATOMIC_INIT(0);
+
+static int alloc_remote_mm_id(void)
+{
+	int old = atomic_read(&remote_mm_ids);
+
+	/* Saturate rather than binding a stale queued message to another mm. */
+	while (old < INT_MAX) {
+		int found = atomic_cmpxchg(&remote_mm_ids, old, old + 1);
+
+		if (found == old)
+			return old + 1;
+		old = found;
+	}
+	return 0;
+}
 
 int wasm_init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 {
@@ -11,6 +29,8 @@ int wasm_init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 	 */
 	mutex_init(&mm->context.remote.mutex);
 	atomic_set(&mm->context.remote.state, WASM_REMOTE_IDLE);
+	mm->context.remote.host_id = alloc_remote_mm_id();
+	atomic_set(&mm->context.remote.host_ready, 0);
 	mm->context.remote.request = NULL;
 	mm->context.remote.accepting = true;
 	mm->context.exec_args = NULL;

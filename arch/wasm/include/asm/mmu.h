@@ -20,6 +20,9 @@ enum wasm_remote_state {
 struct wasm_remote_slot {
 	struct mutex mutex;
 	atomic_t state;
+	/* Never reused within a machine; zero disables host registration. */
+	int host_id;
+	atomic_t host_ready;
 	struct wasm_remote_request *request;
 	bool accepting;
 };

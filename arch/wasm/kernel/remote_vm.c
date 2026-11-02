@@ -23,12 +23,45 @@ struct wasm_remote_request {
 };
 
 /*
- * Keep each userspace WebAssembly.Memory owned by its process worker. Passing
- * Memory objects between workers exposes browser-specific wrapper refresh and
- * lifetime behavior, especially after memory growth. A foreign access instead
- * sends only a numeric request through shared kernel memory and asks the owner
- * worker to perform the copy against its local user-memory context.
+ * A registered mm can be copied by the machine agent without interrupting its
+ * user Worker. The cooperative mailbox remains available until registration
+ * completes. Neither route bypasses the generic caller's mm_access checks.
  */
+
+__attribute__((export_name("current_remote_memory_id")))
+int wasm_current_remote_memory_id(void)
+{
+	struct mm_struct *mm = current->mm;
+
+	if (!mm || READ_ONCE(current_thread_info()->context_mm) != mm)
+		return 0;
+	return mm->context.remote.host_id;
+}
+
+__attribute__((export_name("remote_memory_ready")))
+int wasm_remote_memory_ready(int id)
+{
+	struct mm_struct *mm = current->mm;
+	struct wasm_remote_slot *slot;
+
+	if (id <= 0 || wasm_current_remote_memory_id() != id)
+		return -EINVAL;
+	slot = &mm->context.remote;
+	/* The host has already acknowledged retaining this mm's Memory. */
+	atomic_set_release(&slot->host_ready, 1);
+	__builtin_wasm_memory_atomic_notify(&slot->state.counter, 1);
+	return 0;
+}
+
+static int wasm_host_remote_copy(struct wasm_remote_slot *slot,
+				struct wasm_remote_request *request)
+{
+	int copied = wasm_remote_memory_v1_copy(slot->host_id,
+		request->user_addr, request->kernel_addr, request->len,
+		request->write);
+
+	return clamp(copied, 0, (int)request->len);
+}
 
 /*
  * Service one request using the user WebAssembly.Memory local to @task's
@@ -182,6 +215,10 @@ int wasm_access_remote_vm(struct mm_struct *mm, unsigned long addr, void *buf,
 		return 0;
 	}
 	BUG_ON(atomic_read(&slot->state) != WASM_REMOTE_IDLE);
+	if (atomic_read_acquire(&slot->host_ready)) {
+		result = wasm_host_remote_copy(slot, &request);
+		goto out;
+	}
 	WRITE_ONCE(slot->request, &request);
 	atomic_set_release(&slot->state, WASM_REMOTE_PUBLISHED);
 	deadline = wasm_kernel_get_now_nsec() + WASM_REMOTE_WAIT_TIMEOUT_NS;
@@ -205,6 +242,16 @@ int wasm_access_remote_vm(struct mm_struct *mm, unsigned long addr, void *buf,
 
 		now = wasm_kernel_get_now_nsec();
 		if (state == WASM_REMOTE_PUBLISHED) {
+			/* Registration may finish after mailbox publication. Revoke
+			 * that request before copying, or join its existing claimant.
+			 */
+			if (atomic_read_acquire(&slot->host_ready)) {
+				if (wasm_cancel_remote_request(slot)) {
+					result = wasm_host_remote_copy(slot, &request);
+					break;
+				}
+				continue;
+			}
 			/*
 			 * A task is visible before its asynchronously-created
 			 * worker is ready, and exec temporarily makes task->mm
@@ -251,6 +298,7 @@ int wasm_access_remote_vm(struct mm_struct *mm, unsigned long addr, void *buf,
 		wasm_timer_check();
 	}
 
+out:
 	mutex_unlock(&slot->mutex);
 	return result;
 }
@@ -269,5 +317,10 @@ void wasm_remote_mm_shutdown(struct mm_struct *mm)
 	WRITE_ONCE(slot->accepting, false);
 	WARN_ON_ONCE(atomic_read(&slot->state) != WASM_REMOTE_IDLE);
 	WARN_ON_ONCE(READ_ONCE(slot->request));
+	/* mm_users has drained, including mm_access users. Also release an
+	 * acknowledged registration whose Worker failed before publishing ready.
+	 */
+	if (slot->host_id)
+		wasm_remote_memory_v1_release(slot->host_id);
 	mutex_unlock(&slot->mutex);
 }

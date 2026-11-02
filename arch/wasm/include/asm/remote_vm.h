@@ -5,5 +5,7 @@
 struct task_struct;
 
 void wasm_service_remote_request(struct task_struct *task);
+int wasm_current_remote_memory_id(void);
+int wasm_remote_memory_ready(int id);
 
 #endif
