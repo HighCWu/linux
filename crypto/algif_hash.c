@@ -60,6 +60,58 @@ static void hash_free_result(struct sock *sk, struct hash_ctx *ctx)
 	ctx->result = NULL;
 }
 
+/* A Wasm user iterator addresses a different linear memory, not pinnable
+ * kernel pages. Keep at most one accounted page per active hash call and
+ * retain it until crypto_wait_req() has completed, including asynchronous
+ * implementations of the ordinary synchronous socket operation.
+ */
+static ssize_t hash_get_sg(struct msghdr *msg, struct af_alg_sgl *sgl,
+			  size_t max_pages, struct page **copied_page)
+{
+	size_t npages = iov_iter_npages(&msg->msg_iter, max_pages);
+
+	*copied_page = NULL;
+	sgl->sgt.sgl = sgl->sgl;
+	sgl->sgt.nents = 0;
+	sgl->sgt.orig_nents = 0;
+	if (!npages)
+		return -EIO;
+
+	if (IS_ENABLED(CONFIG_WASM) && user_backed_iter(&msg->msg_iter)) {
+		struct page *page;
+		size_t copied, wanted;
+
+		sgl->need_unpin = false;
+		sg_init_table(sgl->sgl, 1);
+		page = alloc_page(GFP_KERNEL | __GFP_ACCOUNT);
+		if (!page)
+			return -ENOMEM;
+		wanted = min_t(size_t, PAGE_SIZE, iov_iter_count(&msg->msg_iter));
+		copied = copy_page_from_iter(page, 0, wanted, &msg->msg_iter);
+		if (!copied) {
+			put_page(page);
+			return -EFAULT;
+		}
+		sg_set_page(sgl->sgl, page, copied, 0);
+		sgl->sgt.nents = 1;
+		sgl->sgt.orig_nents = 1;
+		*copied_page = page;
+		return copied;
+	}
+
+	sg_init_table(sgl->sgl, npages);
+	sgl->need_unpin = iov_iter_extract_will_pin(&msg->msg_iter);
+	return extract_iter_to_sg(&msg->msg_iter, LONG_MAX, &sgl->sgt,
+				 npages, 0);
+}
+
+static void hash_put_sg(struct af_alg_sgl *sgl, struct page *copied_page)
+{
+	af_alg_free_sg(sgl);
+	if (copied_page)
+		put_page(copied_page);
+}
+
 static int hash_sendmsg(struct socket *sock, struct msghdr *msg,
 			size_t ignored)
 {
@@ -67,7 +119,8 @@ static int hash_sendmsg(struct socket *sock, struct msghdr *msg,
 	struct alg_sock *ask = alg_sk(sk);
 	struct hash_ctx *ctx = ask->private;
 	ssize_t copied = 0;
-	size_t len, max_pages, npages;
+	size_t len, max_pages;
+	struct page *copied_page = NULL;
 	bool continuing, need_init = false;
 	int err;
 
@@ -103,21 +156,7 @@ static int hash_sendmsg(struct socket *sock, struct msghdr *msg,
 	}
 
 	while (msg_data_left(msg)) {
-		ctx->sgl.sgt.sgl = ctx->sgl.sgl;
-		ctx->sgl.sgt.nents = 0;
-		ctx->sgl.sgt.orig_nents = 0;
-
-		err = -EIO;
-		npages = iov_iter_npages(&msg->msg_iter, max_pages);
-		if (npages == 0)
-			goto unlock_free;
-
-		sg_init_table(ctx->sgl.sgl, npages);
-
-		ctx->sgl.need_unpin = iov_iter_extract_will_pin(&msg->msg_iter);
-
-		err = extract_iter_to_sg(&msg->msg_iter, LONG_MAX,
-					 &ctx->sgl.sgt, npages, 0);
+		err = hash_get_sg(msg, &ctx->sgl, max_pages, &copied_page);
 		if (err < 0)
 			goto unlock_free;
 		len = err;
@@ -157,7 +196,8 @@ static int hash_sendmsg(struct socket *sock, struct msghdr *msg,
 			goto unlock_free;
 
 		copied += len;
-		af_alg_free_sg(&ctx->sgl);
+		hash_put_sg(&ctx->sgl, copied_page);
+		copied_page = NULL;
 	}
 
 done_more:
@@ -169,7 +209,7 @@ unlock:
 	return copied ?: err;
 
 unlock_free:
-	af_alg_free_sg(&ctx->sgl);
+	hash_put_sg(&ctx->sgl, copied_page);
 unlock_free_result:
 	hash_free_result(sk, ctx);
 	ctx->more = false;
