@@ -38,6 +38,11 @@ void *__start_builtin_fw, *__end_builtin_fw;
 void *__per_cpu_load, *__per_cpu_start, *__per_cpu_end;
 const struct obs_kernel_param *__setup_start, *__setup_end;
 void *__start_once, *__end_once;
+#ifdef CONFIG_SECURITY
+struct lsm_info;
+struct lsm_info *__start_lsm_info, *__end_lsm_info;
+struct lsm_info *__start_early_lsm_info, *__end_early_lsm_info;
+#endif
 
 struct section {
 	void *start, *end;
@@ -113,6 +118,11 @@ void __init init_sections(unsigned long node)
 	SECTION(".con_initcall.init",	__con_initcall_start,	_,	__con_initcall_end);
 	SECTION(".init.setup",		__setup_start,		_,	__setup_end);
 	SECTION(".data.once",		__start_once,		_,	__end_once);
+#ifdef CONFIG_SECURITY
+	SECTION(".lsm_info.init", __start_lsm_info, _, __end_lsm_info);
+	SECTION(".early_lsm_info.init", __start_early_lsm_info, _,
+		__end_early_lsm_info);
+#endif
 
 	SECTION_STRUCT(".data..percpu..first",		percpu_first);
 	SECTION_STRUCT(".data..percpu..page_aligned",	percpu_page_aligned);

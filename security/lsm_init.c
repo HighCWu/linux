@@ -15,8 +15,13 @@ static __initdata int lsm_enabled_true = 1;
 static __initdata int lsm_enabled_false = 0;
 
 /* Pointers to LSM sections defined in include/asm-generic/vmlinux.lds.h */
+#ifdef CONFIG_WASM
+extern struct lsm_info *__start_lsm_info, *__end_lsm_info;
+extern struct lsm_info *__start_early_lsm_info, *__end_early_lsm_info;
+#else
 extern struct lsm_info __start_lsm_info[], __end_lsm_info[];
 extern struct lsm_info __start_early_lsm_info[], __end_early_lsm_info[];
+#endif
 
 /* Number of "early" LSMs */
 static __initdata unsigned int lsm_count_early;

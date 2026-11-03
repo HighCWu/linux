@@ -23,6 +23,8 @@ my %keep = map { $_ => 1 } qw(
     .con_initcall.init
     .init.setup
     .data.once
+    .lsm_info.init
+    .early_lsm_info.init
 
     .data..percpu..first
     .data..percpu..page_aligned
