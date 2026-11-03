@@ -32,6 +32,9 @@ static inline unsigned long __get_wchan(struct task_struct *p)
 
 static inline void flush_thread(void)
 {
+	/* The old image's TLS is no longer part of the new address space.
+	 * Reset only at exec commit; failed image preparation must retain it. */
+	current_thread_info()->tp_value = 0;
 }
 
 struct thread_struct {};
