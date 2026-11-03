@@ -29,7 +29,7 @@ static void do_start_kernel(void *unused)
 
 static void *__init load_devicetree(size_t *size)
 {
-	phys_addr_t bootstrap_size;
+	phys_addr_t bootstrap_start, bootstrap_size;
 	void *devicetree;
 	size_t copied;
 
@@ -38,22 +38,24 @@ static void *__init load_devicetree(size_t *size)
 
 	/*
 	 * memblock has no memory ranges until it reads /memory from the FDT.
-	 * Temporarily describe the materialized linear memory plus enough space
-	 * for this exact blob, then remove that description before the FDT scan
-	 * installs the authoritative range.
+	 * The host may already have placed an initrd in the materialized memory.
+	 * Its FDT reservation is not known yet. Allocate beyond that entire prefix
+	 * so a small gap after __heap_base cannot make this blob overwrite initrd.
+	 * The memblock materialization hook grows memory before zeroing/copying.
+	 * Remove this temporary range before the FDT installs the real memory map.
 	 */
-	bootstrap_size = PFN_PHYS(__builtin_wasm_memory_size(0));
-	BUG_ON(bootstrap_size > PHYS_ADDR_MAX - PAGE_SIZE);
-	BUG_ON(*size > PHYS_ADDR_MAX - bootstrap_size - PAGE_SIZE);
-	bootstrap_size = PAGE_ALIGN(bootstrap_size + *size);
-	BUG_ON(memblock_add(0, bootstrap_size));
+	bootstrap_start = PFN_PHYS(__builtin_wasm_memory_size(0));
+	BUG_ON(bootstrap_start > PHYS_ADDR_MAX - PAGE_SIZE);
+	BUG_ON(*size > PHYS_ADDR_MAX - bootstrap_start - PAGE_SIZE);
+	bootstrap_size = PAGE_ALIGN(*size);
+	BUG_ON(memblock_add(bootstrap_start, bootstrap_size));
 
 	devicetree = memblock_alloc_or_panic(
 		*size, roundup_pow_of_two(FDT_V17_SIZE));
 	copied = wasm_boot_get_devicetree(devicetree, *size);
 	BUG_ON(copied != *size || fdt_check_header(devicetree) ||
 	       fdt_totalsize(devicetree) > *size);
-	BUG_ON(memblock_remove(0, bootstrap_size));
+	BUG_ON(memblock_remove(bootstrap_start, bootstrap_size));
 	return devicetree;
 }
 
