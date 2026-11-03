@@ -142,8 +142,11 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 }
 
 /* Private compiler/Worker execution boundary, not a Linux syscall. The host
- * must defer this while a kernel callback or a signal frame is live, and until
- * the current user instance has initialized its own stack and native TLS.
+ * must defer this while an allocator/startup callback is live, and until the
+ * current user instance has initialized its own stack and native TLS. A signal
+ * handler without such callbacks may nest this entry: its signal frame and
+ * blocked mask are already installed, and the saved pt_regs below protects
+ * the interrupted return work just as a nested real syscall does.
  * In particular, do not manufacture a gettid syscall: that would add seccomp
  * and ptrace events to ordinary computation and kill strict-seccomp tasks.
  */
@@ -185,6 +188,14 @@ wasm_user_poll_v1(void)
 	instrumentation_end();
 	exit_to_user_mode();
 	return error;
+}
+
+/* Hosts predating this reviewed nesting contract keep deferring handlers.
+ * This private fixed-i32 capability does not alter the Linux syscall ABI. */
+__attribute__((export_name("user_poll_nested_v1"))) noinstr int
+wasm_user_poll_nested_v1(void)
+{
+	return 1;
 }
 
 SYSCALL_DEFINE0(wasm_shm_unavailable)
