@@ -206,7 +206,8 @@ SYSCALL_DEFINE1(wasm_brk, unsigned long, requested)
 	/* The allocator owns mmap backing in the same monotonic arena. Refuse
 	 * shrink/replacement rather than making those live allocations overlap.
 	 * Like Linux brk, a refused change returns the unchanged break, not errno. */
-	if (!requested || requested <= old || requested > TASK_SIZE)
+	if (!requested || requested <= old || requested > TASK_SIZE ||
+	    requested >= (unsigned long)-4095)
 		goto out;
 	if (check_data_rlimit(rlimit(RLIMIT_DATA), requested, layout[0],
 			      layout[2], layout[1]))
