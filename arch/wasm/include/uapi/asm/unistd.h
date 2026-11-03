@@ -21,10 +21,13 @@
 /*
  * wasm keeps the generic NOMMU memory syscalls disabled: their VMA and file
  * mapping model cannot describe a directly-dereferenceable WebAssembly linear
- * memory address.  Anonymous mmap and munmap nevertheless have their standard
+ * memory address. Direct brk, anonymous mmap and munmap have their standard
  * asm-generic numbers and are implemented by arch-specific direct-memory
  * wrappers.
  */
+#define __NR_brk 214
+__SYSCALL(__NR_brk, sys_wasm_brk)
+
 #define __NR_munmap 215
 __SYSCALL(__NR_munmap, sys_wasm_munmap)
 

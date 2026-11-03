@@ -1,7 +1,10 @@
 #include <linux/entry-common.h>
 #include <linux/mman.h>
+#include <linux/mm.h>
 #include <linux/overflow.h>
 #include <linux/rcupdate.h>
+#include <linux/resource.h>
+#include <linux/sched/signal.h>
 #include <linux/seccomp.h>
 #include <linux/syscalls.h>
 #ifdef CONFIG_WASM_MMAP_COPY_TEST
@@ -174,6 +177,61 @@ wasm_callback_irq_restore_v1(unsigned int flags)
 
 	local_irq_restore(irqflags);
 }
+
+/* WASM_BRK_SYSCALL_BEGIN */
+/* Standard brk over the existing process-owned direct heap, never an MMU. */
+SYSCALL_DEFINE1(wasm_brk, unsigned long, requested)
+{
+	struct mm_struct *mm = current->mm;
+	u64 layout[3]; /* initial break, static data start/end */
+	unsigned long old, updated, limit, pages;
+	long result;
+	int error;
+
+	if (!mm)
+		return -ENOMEM;
+	/* No kernel lock may span a user callback: mutex wakeups and signals
+	 * can re-enter Linux. Layout is immutable; the allocator's own state
+	 * mutex serializes the monotonic break and its memory.grow operation. */
+	error = wasm_user_brk_v1_layout(layout);
+	if (error)
+		return error;
+	if (layout[0] > TASK_SIZE || layout[2] > layout[0] ||
+	    layout[1] > layout[2] || !layout[0])
+		return -EFAULT;
+	old = wasm_user_brk_v1_update(0);
+	if (old < layout[0] || old > TASK_SIZE)
+		return -EFAULT;
+	result = old;
+	/* The allocator owns mmap backing in the same monotonic arena. Refuse
+	 * shrink/replacement rather than making those live allocations overlap.
+	 * Like Linux brk, a refused change returns the unchanged break, not errno. */
+	if (!requested || requested <= old || requested > TASK_SIZE)
+		goto out;
+	if (check_data_rlimit(rlimit(RLIMIT_DATA), requested, layout[0],
+			      layout[2], layout[1]))
+		goto out;
+	limit = rlimit(RLIMIT_AS);
+	pages = requested / PAGE_SIZE + !!(requested % PAGE_SIZE);
+	if (limit != RLIM_INFINITY && pages > limit / PAGE_SIZE)
+		goto out;
+	updated = wasm_user_brk_v1_update(requested);
+	if (updated < old || updated > TASK_SIZE)
+		return -EFAULT;
+	result = updated;
+out:
+	/* A later callback may finish before this frame resumes. Publish a
+	 * high-water break so an older observation cannot undo its record. */
+	spin_lock(&mm->arg_lock);
+	mm->start_brk = layout[0];
+	mm->start_data = layout[1];
+	mm->end_data = layout[2];
+	if (mm->brk < (unsigned long)result)
+		mm->brk = result;
+	spin_unlock(&mm->arg_lock);
+	return result;
+}
+/* WASM_BRK_SYSCALL_END */
 
 SYSCALL_DEFINE1(set_thread_area, unsigned long, addr)
 {

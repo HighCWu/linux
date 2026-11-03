@@ -89,6 +89,9 @@ int wasm_import(user, futex_atomic_cmpxchg)(u32 *oldval, u32 __user *uaddr,
 
 long wasm_import(user_v2, mremap)(unsigned long addr, unsigned long old_len,
 				unsigned long new_len, unsigned long flags);
+/* Fixed u64 layout slots and process offsets, never shared user/kernel pointers. */
+int wasm_import(user_brk_v1, layout)(u64 fields[3]);
+unsigned long wasm_import(user_brk_v1, update)(unsigned long requested);
 long wasm_import(user_v2, msync)(unsigned long addr, unsigned long len, int flags);
 long wasm_import(user_v2, madvise)(unsigned long addr, unsigned long len, int advice);
 long wasm_import(user_v2, mmap_fixed)(unsigned long addr, unsigned long len);
