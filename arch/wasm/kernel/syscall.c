@@ -141,6 +141,52 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 	}
 }
 
+/* Private compiler/Worker execution boundary, not a Linux syscall. The host
+ * must defer this while a kernel callback or a signal frame is live, and until
+ * the current user instance has initialized its own stack and native TLS.
+ * In particular, do not manufacture a gettid syscall: that would add seccomp
+ * and ptrace events to ordinary computation and kill strict-seccomp tasks.
+ */
+__attribute__((export_name("user_poll_v1"))) noinstr int
+wasm_user_poll_v1(void)
+{
+	struct pt_regs *regs = current_pt_regs();
+	struct pt_regs saved;
+	unsigned long sp = 0;
+	int error;
+
+	if (!current_thread_info()->in_user_context)
+		return -EAGAIN;
+	raw_local_irq_disable();
+	enter_from_user_mode(regs);
+	instrumentation_begin();
+	saved = *regs;
+	regs->user_mode = 0;
+	regs->syscall_nr = -1;
+	regs->restart_syscall_nr = -1;
+	regs->syscall_return = 0;
+	error = wasm_user_signal_v1_stack_pointer(&sp);
+	regs->user_sp = sp;
+	if (!error) {
+		/* Like a syscall entry, this proves a user quiescent state, but
+		 * does not run syscall-specific tracing, policy or restart work. */
+		rcu_note_context_switch(false);
+		local_irq_enable();
+		wasm_timer_check();
+		wasm_service_remote_request(current);
+		local_irq_disable();
+		irqentry_exit_to_user_mode_prepare(regs);
+	}
+	/* Copy back while RCU is still watching and instrumentation is legal.
+	 * The generic IRQ return helper's final transition follows this copy.
+	 * An invalid user stack refuses without delivering a pending handler on
+	 * a stale stack; the caller must report the execution-ABI failure. */
+	*regs = saved;
+	instrumentation_end();
+	exit_to_user_mode();
+	return error;
+}
+
 SYSCALL_DEFINE0(wasm_shm_unavailable)
 {
 	return -ENOSYS;
