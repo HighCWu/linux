@@ -31,6 +31,15 @@ config CMDLINE
 	string "Kernel command string to append"
 	default ""
 
+config WASM_ELF_CONTAINER
+	bool "Experimental ELF container for static Wasm executables"
+	default n
+	help
+	  Accept the experimental canonical ELF carrier containing a raw static
+	  WebAssembly executable, in addition to ordinary raw Wasm files. This
+	  does not enable ELF relocations, interpreters, dynamic sections, or shared
+	  objects. Enable only with the matching LLD output option.
+
 config MMU
 	def_bool n
 

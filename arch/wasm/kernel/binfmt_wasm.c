@@ -16,6 +16,10 @@
 #include <linux/string.h>
 #include <linux/syscalls.h>
 
+#ifdef CONFIG_WASM_ELF_CONTAINER
+#include "elf_container.h"
+#endif
+
 /* Four pages amortize host calls without requiring a large kernel allocation. */
 #define WASM_EXEC_MAX_CHUNK_SIZE SZ_256K
 #define WASM_ARG_LIMIT SZ_256K
@@ -339,32 +343,75 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	u8 *chunk = NULL;
 	int ret;
 	loff_t filesize;
+	loff_t image_offset = 0;
+	loff_t image_size;
 	bool compiling = false;
 	u32 chunk_size;
+	bool raw_wasm = !memcmp(bprm->buf, "\0asm\1\0\0\0", 8);
 
-	if (memcmp(bprm->buf, "\0asm\1\0\0\0", 8))
+#ifdef CONFIG_WASM_ELF_CONTAINER
+	u8 prefix[160];
+	size_t prefix_len = 0;
+	size_t prefix_size;
+	loff_t prefix_offset = 0;
+	struct wasm_elf_image_range image;
+	unsigned int width;
+#endif
+
+#ifndef CONFIG_WASM_ELF_CONTAINER
+	if (!raw_wasm)
 		return -ENOEXEC;
+#endif
 
 	ret = file_get_size(bprm->file, &filesize);
 	if (ret < 0)
 		return ret;
-	if (filesize > U32_MAX)
+	if (filesize < 0 || filesize > U32_MAX)
 		return -EFBIG;
+	image_size = filesize;
 
-	chunk_size = min_t(loff_t, filesize, WASM_EXEC_MAX_CHUNK_SIZE);
+	if (!raw_wasm) {
+#ifdef CONFIG_WASM_ELF_CONTAINER
+		prefix_size = min_t(loff_t, filesize, sizeof(prefix));
+		while (prefix_len < prefix_size) {
+			ssize_t read = kernel_read(bprm->file, prefix + prefix_len,
+						   prefix_size - prefix_len,
+						   &prefix_offset);
+
+			if (read < 0)
+				return read;
+			if (!read)
+				return -ENOEXEC;
+			prefix_len += read;
+		}
+
+#ifdef CONFIG_64BIT
+		width = 64;
+#else
+		width = 32;
+#endif
+		if (!wasm_elf_container_parse(prefix, prefix_len, filesize, width,
+					      &image))
+			return -ENOEXEC;
+		image_offset = image.offset;
+		image_size = image.size;
+#endif
+	}
+
+	chunk_size = min_t(loff_t, image_size, WASM_EXEC_MAX_CHUNK_SIZE);
 	chunk = kmalloc(chunk_size, GFP_KERNEL);
 	if (!chunk)
 		return -ENOMEM;
 
-	ret = wasm_user_compile_begin((u32)filesize);
+	ret = wasm_user_compile_begin((u32)image_size);
 	if (ret)
 		goto err;
 	compiling = true;
 
-	while (offset < filesize) {
-		u32 size = min_t(loff_t, filesize - offset, chunk_size);
-		loff_t chunk_offset = offset;
-		ssize_t read = kernel_read(bprm->file, chunk, size, &offset);
+	while (offset < image_size) {
+		u32 size = min_t(loff_t, image_size - offset, chunk_size);
+		loff_t read_offset = image_offset + offset;
+		ssize_t read = kernel_read(bprm->file, chunk, size, &read_offset);
 
 		if (read < 0) {
 			ret = read;
@@ -374,10 +421,11 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 			ret = -EIO;
 			goto err;
 		}
-		ret = wasm_user_compile_write(chunk, (u32)chunk_offset,
+		ret = wasm_user_compile_write(chunk, (u32)offset,
 					      (u32)read);
 		if (ret)
 			goto err;
+		offset += read;
 	}
 
 	ret = wasm_user_compile_end(user_memory_limit_pages());
