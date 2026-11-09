@@ -429,7 +429,8 @@ SYSCALL_DEFINE3(wasm_madvise, unsigned long, addr, size_t, len, int, advice)
 	unsigned long rounded, end;
 
 	if (!PAGE_ALIGNED(addr) ||
-	    ((advice < MADV_NORMAL || advice > MADV_DONTNEED) && advice != MADV_FREE) ||
+	    ((advice < MADV_NORMAL || advice > MADV_DONTNEED) && advice != MADV_FREE &&
+	     advice != MADV_WIPEONFORK && advice != MADV_KEEPONFORK) ||
 	    check_add_overflow(len, PAGE_SIZE - 1, &rounded))
 		return -EINVAL;
 	if (!len)
