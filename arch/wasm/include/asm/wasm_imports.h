@@ -89,6 +89,10 @@ int wasm_import(user, futex_atomic_cmpxchg)(u32 *oldval, u32 __user *uaddr,
 
 long wasm_import(user_v2, mremap)(unsigned long addr, unsigned long old_len,
 				unsigned long new_len, unsigned long flags);
+/* Private direct-memory allocator operation for anonymous DONTUNMAP remaps. */
+long wasm_import(user_v2, mremap_dontunmap)(unsigned long addr,
+		unsigned long old_len, unsigned long new_len, unsigned long flags,
+		unsigned long new_addr);
 /* Fixed u64 layout slots and process offsets, never shared user/kernel pointers. */
 int wasm_import(user_brk_v1, layout)(u64 fields[3]);
 unsigned long wasm_import(user_brk_v1, update)(unsigned long requested);

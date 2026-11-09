@@ -386,8 +386,8 @@ SYSCALL_DEFINE5(wasm_mremap, unsigned long, addr, unsigned long, old_len,
 		return -ENOMEM;
 	old_rounded &= PAGE_MASK;
 	new_rounded &= PAGE_MASK;
-	if (flags & MREMAP_DONTUNMAP)
-		return old_rounded == new_rounded ? -EOPNOTSUPP : -EINVAL;
+	if ((flags & MREMAP_DONTUNMAP) && old_rounded != new_rounded)
+		return -EINVAL;
 	if (check_add_overflow(addr, old_rounded, &end) || end > TASK_SIZE)
 		return -EFAULT;
 	if (new_rounded > TASK_SIZE)
@@ -397,8 +397,16 @@ SYSCALL_DEFINE5(wasm_mremap, unsigned long, addr, unsigned long, old_len,
 			return -ENOMEM;
 		if (new_addr < end && addr < new_addr + new_rounded)
 			return -EINVAL;
+		if (flags & MREMAP_DONTUNMAP)
+			return wasm_user_v2_mremap_dontunmap(addr, old_rounded,
+							     new_rounded, flags,
+							     new_addr);
 		return wasm_user_v2_mremap_fixed(addr, old_rounded, new_rounded, new_addr);
 	}
+	if (flags & MREMAP_DONTUNMAP)
+		return wasm_user_v2_mremap_dontunmap(addr, old_rounded,
+							     new_rounded, flags,
+							     new_addr);
 	return wasm_user_v2_mremap(addr, old_rounded, new_rounded, flags);
 }
 
