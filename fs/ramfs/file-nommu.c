@@ -68,6 +68,18 @@ int ramfs_nommu_expand_for_mapping(struct inode *inode, size_t newsize)
 	int ret;
 	gfp_t gfp = mapping_gfp_mask(inode->i_mapping);
 
+	/* A zero-length shmem file needs no pages.  Keep the normal size check,
+	 * but avoid get_order(0), which does not describe an allocatable page order.
+	 */
+	if (!newsize) {
+		ret = inode_newsize_ok(inode, newsize);
+		if (ret)
+			return ret;
+
+		i_size_write(inode, 0);
+		return 0;
+	}
+
 	/* make various checks */
 	order = get_order(newsize);
 	if (unlikely(order > MAX_PAGE_ORDER))
