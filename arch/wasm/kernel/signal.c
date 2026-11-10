@@ -8,12 +8,49 @@
 #include <linux/overflow.h>
 #include <linux/uaccess.h>
 
+struct wasm_signal_syscall_v1 {
+	long result;
+	unsigned long flags;
+};
+
+#define WASM_SIGNAL_SYSCALL_VALID	(1UL << 0)
+#define WASM_SIGNAL_SYSCALL_RESTART	(1UL << 1)
+#define WASM_SIGNAL_SYSCALL_FLAGS	(WASM_SIGNAL_SYSCALL_VALID | \
+					 WASM_SIGNAL_SYSCALL_RESTART)
+
 struct wasm_signal_frame {
 	stack_t stack;
 	sigset_t mask;
 	struct wasm_signal_frame *previous;
 	const kernel_siginfo_t *previous_info;
+	struct wasm_signal_syscall_v1 syscall_snapshot;
+	struct wasm_signal_syscall_v1 syscall_override;
+	bool has_syscall_override;
 };
+
+static struct wasm_signal_syscall_v1
+snapshot_signal_syscall(const struct pt_regs *regs)
+{
+	struct wasm_signal_syscall_v1 snapshot = {};
+
+	if (regs->syscall_nr >= 0) {
+		snapshot.flags |= WASM_SIGNAL_SYSCALL_VALID;
+		snapshot.result = regs->syscall_return;
+	}
+	if (regs->restart_syscall_nr >= 0) {
+		snapshot.flags |= WASM_SIGNAL_SYSCALL_RESTART;
+		/* A user handler sees interruption, while the kernel retains the
+		 * original restart decision unless the callback explicitly cancels. */
+		snapshot.result = -EINTR;
+	}
+	return snapshot;
+}
+
+static bool is_restart_error(long result)
+{
+	return result == -ERESTARTNOHAND || result == -ERESTARTSYS ||
+	       result == -ERESTARTNOINTR || result == -ERESTART_RESTARTBLOCK;
+}
 
 static void syscall_restart(struct pt_regs *regs, bool handler,
 			    const struct k_sigaction *ka)
@@ -71,6 +108,7 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	frame.mask = saved_mask;
 	frame.previous = previous_frame;
 	frame.previous_info = previous_info;
+	frame.syscall_snapshot = snapshot_signal_syscall(&saved_regs);
 
 	/* Old modules may still receive ordinary callbacks without a C stack
 	 * export. A registered alternative stack, however, requires the v1 ABI. */
@@ -114,6 +152,16 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	 * restart decision across those calls.
 	 */
 	*regs = saved_regs;
+	if (frame.has_syscall_override) {
+		/* Keeping a restart is a validated no-op. Preserve the internal
+		 * ERESTART result so a later signal-exit pass can recompute it. */
+		if (!(frame.syscall_override.flags & WASM_SIGNAL_SYSCALL_RESTART)) {
+			regs->syscall_return = frame.syscall_override.result;
+			if (frame.syscall_snapshot.flags &
+			    WASM_SIGNAL_SYSCALL_RESTART)
+				regs->restart_syscall_nr = -1;
+		}
+	}
 	ti->active_signal_frame = previous_frame;
 	ti->active_siginfo = previous_info;
 	/* Like rt_sigreturn, normal callback completion restores the saved/edited
@@ -128,6 +176,67 @@ static void call_signal_handler(struct ksignal *ksig, struct pt_regs *regs)
 	set_current_blocked(&frame.mask);
 	if (failed)
 		force_sigsegv(ksig->sig);
+}
+
+__attribute__((export_name("copy_signal_syscall_v1"))) int
+wasm_copy_active_signal_syscall_v1(struct wasm_signal_syscall_v1 __user *to)
+{
+	const struct wasm_signal_frame *frame =
+		current_thread_info()->active_signal_frame;
+
+	if (!frame)
+		return -EINVAL;
+	return copy_to_user(to, &frame->syscall_snapshot,
+			    sizeof(frame->syscall_snapshot)) ? -EFAULT : 0;
+}
+
+__attribute__((export_name("finish_signal_syscall_v1"))) int
+wasm_finish_active_signal_syscall_v1(
+	const struct wasm_signal_syscall_v1 __user *from)
+{
+	struct wasm_signal_frame *frame =
+		current_thread_info()->active_signal_frame;
+	struct wasm_signal_syscall_v1 updated;
+	struct wasm_signal_syscall_v1 effective;
+	unsigned long snapshot_flags;
+	unsigned long updated_flags;
+
+	if (!frame)
+		return -EINVAL;
+	if (copy_from_user(&updated, from, sizeof(updated)))
+		return -EFAULT;
+
+	updated_flags = updated.flags;
+	if (updated_flags & ~WASM_SIGNAL_SYSCALL_FLAGS)
+		return -EINVAL;
+	snapshot_flags = frame->syscall_snapshot.flags;
+	if ((updated_flags & WASM_SIGNAL_SYSCALL_VALID) !=
+	    (snapshot_flags & WASM_SIGNAL_SYSCALL_VALID))
+		return -EINVAL;
+
+	/* A signal outside a syscall has a zero snapshot and accepts only a
+	 * zero no-op, so it cannot manufacture a return value or restart. */
+	if (!(snapshot_flags & (WASM_SIGNAL_SYSCALL_VALID |
+				WASM_SIGNAL_SYSCALL_RESTART)))
+		return updated.result || updated_flags ? -EINVAL : 0;
+
+	effective = frame->has_syscall_override ? frame->syscall_override :
+							 frame->syscall_snapshot;
+	if (updated_flags & WASM_SIGNAL_SYSCALL_RESTART) {
+		/* A callback may preserve a restart already in force, but may not
+		 * create or re-enable one after it has been cancelled. */
+		if (!(effective.flags & WASM_SIGNAL_SYSCALL_RESTART) ||
+		    updated.result != frame->syscall_snapshot.result)
+			return -EINVAL;
+	} else if (is_restart_error(updated.result)) {
+		/* Do not feed internal ERESTART values back into signal exit. */
+		return -EINVAL;
+	}
+
+	/* Publish only after the user copy and every validation have succeeded. */
+	frame->syscall_override = updated;
+	frame->has_syscall_override = true;
+	return 0;
 }
 
 __attribute__((export_name("copy_siginfo"))) int
