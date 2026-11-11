@@ -397,8 +397,7 @@ int wasm_dynamic_file_pin_v1(int fd, u64 device, u64 inode)
 	mutex_lock(&mm->context.remote.mutex);
 	if (!mm->context.remote.accepting) {
 		result = -ESRCH;
-	} else if (mm->context.dynamic_file_count >= 1024 ||
-		   mm->context.dynamic_file_next == INT_MAX) {
+	} else if (mm->context.dynamic_file_next == INT_MAX) {
 		result = -ENOSPC;
 	} else {
 		pin->file = file;
