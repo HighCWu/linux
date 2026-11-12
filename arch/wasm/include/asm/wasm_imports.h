@@ -3,6 +3,9 @@
 
 #include <linux/types.h>
 
+/* Maximum time a parked worker waits before servicing cooperative work. */
+#define WASM_WORKER_CHECKPOINT_TIMEOUT_NS (50ULL * 1000 * 1000)
+
 #define wasm_import(ns, name)                                   \
 	__attribute__((import_module(#ns), import_name(#name))) \
 	wasm_##ns##_##name

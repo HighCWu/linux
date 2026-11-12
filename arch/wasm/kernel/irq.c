@@ -1,5 +1,6 @@
 #include <asm/smp.h>
 #include <asm/timex.h>
+#include <asm/wasm_imports.h>
 #include <linux/cpu.h>
 #include <linux/bitops.h>
 #include <linux/hardirq.h>
@@ -24,9 +25,6 @@ struct pending_irqs {
 static DEFINE_PER_CPU(unsigned long, irqflags);
 static DEFINE_PER_CPU(struct pending_irqs, irq_pending);
 static DEFINE_PER_CPU(u64, timer_deadline_ns);
-
-/* Bound idle sleeps only when the host can make progress on cooperative work. */
-#define WORKER_CHECKPOINT_TIMEOUT_NS	(50ULL * 1000 * 1000)
 
 /* delivery target per hwirq, maintained by wasm_irq_set_affinity */
 static u32 irq_target[NR_IRQS];
@@ -74,8 +72,8 @@ void __cpuidle arch_cpu_idle(void)
 	}
 
 	if (has_work_source &&
-	    (timeout_ns < 0 || timeout_ns > WORKER_CHECKPOINT_TIMEOUT_NS))
-		timeout_ns = WORKER_CHECKPOINT_TIMEOUT_NS;
+	    (timeout_ns < 0 || timeout_ns > WASM_WORKER_CHECKPOINT_TIMEOUT_NS))
+		timeout_ns = WASM_WORKER_CHECKPOINT_TIMEOUT_NS;
 
 	ret = __builtin_wasm_memory_atomic_wait64(&pending->summary.counter, 0,
 						  timeout_ns);

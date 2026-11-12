@@ -80,6 +80,7 @@ struct task_struct *__switch_to(struct task_struct *from,
 	struct thread_info *to_info = task_thread_info(to);
 	struct task_struct *prev;
 	int cpu, other_cpu;
+	long long timeout_ns;
 
 	cpu = atomic_xchg(&from_info->running_cpu, WASM_CPU_PARKED);
 	BUG_ON(current != from);
@@ -135,10 +136,19 @@ struct task_struct *__switch_to(struct task_struct *from,
 		}
 
 		BUG_ON(cpu != WASM_CPU_PARKED);
+		/*
+		 * This worker has no logical CPU while parked. The host callback only
+		 * services Worker publication metadata; it neither runs guest code nor
+		 * reenters the kernel. Bound the wait only when that work source exists.
+		 */
+		if (wasm_kernel_worker_checkpoint_v1() == 1)
+			timeout_ns = WASM_WORKER_CHECKPOINT_TIMEOUT_NS;
+		else
+			timeout_ns = -1;
 		__builtin_wasm_memory_atomic_wait32(
 			&from_info->running_cpu.counter,
 			/* block if the value is: */ WASM_CPU_PARKED,
-			/* timeout: */ -1);
+			/* timeout: */ timeout_ns);
 	}
 
 	BUG_ON(cpu >= nr_cpu_ids || cpu != from_info->cpu);
