@@ -25,6 +25,9 @@ static DEFINE_PER_CPU(unsigned long, irqflags);
 static DEFINE_PER_CPU(struct pending_irqs, irq_pending);
 static DEFINE_PER_CPU(u64, timer_deadline_ns);
 
+/* Bound idle sleeps only when the host can make progress on cooperative work. */
+#define WORKER_CHECKPOINT_TIMEOUT_NS	(50ULL * 1000 * 1000)
+
 /* delivery target per hwirq, maintained by wasm_irq_set_affinity */
 static u32 irq_target[NR_IRQS];
 
@@ -51,7 +54,11 @@ void __cpuidle arch_cpu_idle(void)
 	u64 deadline = __this_cpu_read(timer_deadline_ns);
 	u64 now;
 	s64 timeout_ns;
+	bool has_work_source;
 	int ret;
+
+	/* This is an unlocked idle boundary; never call the host from spin paths. */
+	has_work_source = wasm_kernel_worker_checkpoint_v1() == 1;
 
 	if (deadline == 0) {
 		timeout_ns = -1; // forever
@@ -66,12 +73,24 @@ void __cpuidle arch_cpu_idle(void)
 		timeout_ns = deadline - now;
 	}
 
+	if (has_work_source &&
+	    (timeout_ns < 0 || timeout_ns > WORKER_CHECKPOINT_TIMEOUT_NS))
+		timeout_ns = WORKER_CHECKPOINT_TIMEOUT_NS;
+
 	ret = __builtin_wasm_memory_atomic_wait64(&pending->summary.counter, 0,
 						  timeout_ns);
 
-	if (ret == 2 /* timeout reached */) {
-		__this_cpu_write(timer_deadline_ns, 0);
-		pend_irq(pending, TIMER_IRQ);
+	if (ret == 2 /* timeout reached */ && deadline != 0) {
+		/* A checkpoint cap is not a timer expiry. Recheck the original
+		 * deadline against real time before consuming it. Also avoid clearing
+		 * a deadline that was replaced while this cpu was waiting.
+		 */
+		now = wasm_kernel_get_now_nsec();
+		if ((s64)(now - deadline) >= 0 &&
+		    __this_cpu_read(timer_deadline_ns) == deadline) {
+			__this_cpu_write(timer_deadline_ns, 0);
+			pend_irq(pending, TIMER_IRQ);
+		}
 	}
 
 	raw_local_irq_enable();
@@ -192,6 +211,22 @@ trigger_irq_for_cpu(unsigned int cpu, irq_hw_number_t irq)
 
 	__builtin_wasm_memory_atomic_notify((void *)&pending->summary.counter,
 					    /* at most, wake up: */ 1);
+}
+
+/* Wake idle CPU workers so they can recheck their cooperative work source.
+ * This is only a notification: it neither queues an IRQ nor changes timers.
+ */
+__attribute__((export_name("worker_execution_notify_v1"))) void
+worker_execution_notify_v1(void)
+{
+	unsigned int cpu;
+
+	for_each_online_cpu(cpu) {
+		struct pending_irqs *pending = per_cpu_ptr(&irq_pending, cpu);
+
+		__builtin_wasm_memory_atomic_notify(
+			(void *)&pending->summary.counter, /* at most, wake up: */ 1);
+	}
 }
 
 __attribute__((export_name("trigger_irq"))) void

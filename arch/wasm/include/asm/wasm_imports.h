@@ -12,6 +12,8 @@ int wasm_import(boot, get_initramfs)(char *buf, size_t size);
 
 void wasm_import(kernel, breakpoint)(void);
 void wasm_import(kernel, halt_worker)(void);
+/* Returns 1 when the runtime has cooperative work sources, otherwise 0. */
+int wasm_import(kernel, worker_checkpoint_v1)(void);
 
 /* Whole-machine lifecycle event. Values are part of the guest/host ABI. */
 enum wasm_machine_termination_reason {
