@@ -2,6 +2,7 @@
 #include <linux/mman.h>
 #include <linux/mm.h>
 #include <linux/overflow.h>
+#include <linux/preempt.h>
 #include <linux/rcupdate.h>
 #include <linux/resource.h>
 #include <linux/sched.h>
@@ -192,11 +193,16 @@ wasm_user_poll_v1(void)
  * stack or run any user return work: a loader may have temporarily changed
  * tables and is not a safe point for signal delivery. It only lets RCU,
  * clockevent timers, and cooperative scheduling make progress. */
-__attribute__((export_name("user_maintenance_v1"))) noinstr int
-wasm_user_maintenance_v1(void)
+#define WASM_USER_MAINTENANCE_ALLOW_SCHEDULE 1U
+
+static noinstr int wasm_user_maintenance(u32 flags)
 {
 	struct pt_regs *regs = current_pt_regs();
 	struct pt_regs saved;
+	bool allow_schedule = flags & WASM_USER_MAINTENANCE_ALLOW_SCHEDULE;
+
+	if (flags & ~WASM_USER_MAINTENANCE_ALLOW_SCHEDULE)
+		return -EINVAL;
 
 	if (!current_thread_info()->in_user_context)
 		return -EAGAIN;
@@ -212,18 +218,40 @@ wasm_user_maintenance_v1(void)
 	/* Mark the transition out of userspace only after generic entry has
 	 * reactivated RCU, then service maintenance with IRQs enabled. */
 	rcu_note_context_switch(false);
+	/*
+	 * Timer-only maintenance must leave NEED_RESCHED pending while IRQ
+	 * handlers and RCU make progress.
+	 */
+	if (!allow_schedule)
+		preempt_disable_notrace();
 	local_irq_enable();
 	wasm_timer_check();
-	if (need_resched())
+	if (allow_schedule && need_resched())
 		schedule();
 
 	/* Restore the interrupted user register image without running signal,
 	 * ptrace, syscall-exit, or other user-return preparation. */
 	local_irq_disable();
+	if (!allow_schedule)
+		preempt_enable_no_resched_notrace();
 	*regs = saved;
 	instrumentation_end();
 	exit_to_user_mode();
 	return 0;
+}
+
+/* The original zero-argument entry retains full scheduling semantics. */
+__attribute__((export_name("user_maintenance_v1"))) noinstr int
+wasm_user_maintenance_v1(void)
+{
+	return wasm_user_maintenance(WASM_USER_MAINTENANCE_ALLOW_SCHEDULE);
+}
+
+/* Compiler/Worker-only maintenance selector: bit 0 permits schedule(). */
+__attribute__((export_name("user_maintenance_v2"))) noinstr int
+wasm_user_maintenance_v2(int flags)
+{
+	return wasm_user_maintenance((u32)flags);
 }
 
 /* Hosts predating this reviewed nesting contract keep deferring handlers.
