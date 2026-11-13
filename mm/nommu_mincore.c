@@ -6,38 +6,44 @@
  */
 #include <linux/gfp.h>
 #include <linux/mm.h>
+#include <linux/nommu_mincore.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 
-/*
- * Report the portion of this chunk covered by the VMA containing @addr.
- * The mmap lock is held by the caller, and NOMMU VMAs have resident backing.
- */
+/* NOMMU pages with VMA coverage have resident backing. */
 static long nommu_do_mincore(unsigned long addr, unsigned long pages,
 			     unsigned char *vec)
 {
 	struct vm_area_struct *vma;
 	unsigned long mapped_pages;
 
+	mmap_read_lock(current->mm);
 	vma = vma_lookup(current->mm, addr);
-	if (!vma)
+	if (!vma) {
+		mmap_read_unlock(current->mm);
 		return -ENOMEM;
+	}
 
 	mapped_pages = min(pages, (vma->vm_end - addr) >> PAGE_SHIFT);
-	if (!mapped_pages)
+	if (!mapped_pages) {
+		mmap_read_unlock(current->mm);
 		return -ENOMEM;
+	}
 
 	memset(vec, 1, mapped_pages);
+	mmap_read_unlock(current->mm);
 	return mapped_pages;
 }
 
-SYSCALL_DEFINE3(mincore, unsigned long, start, size_t, len,
-		unsigned char __user *, vec)
+long nommu_mincore(unsigned long start, size_t len,
+		   unsigned char __user *vec,
+		   nommu_mincore_query_fn query)
 {
 	long retval;
 	unsigned long pages;
+	unsigned long max_pages;
 	unsigned char *tmp;
 
 	start = untagged_addr(start);
@@ -62,12 +68,18 @@ SYSCALL_DEFINE3(mincore, unsigned long, start, size_t, len,
 	retval = 0;
 	while (pages) {
 		/* The temporary vector is one kernel page in size. */
-		mmap_read_lock(current->mm);
-		retval = nommu_do_mincore(start, min(pages, PAGE_SIZE), tmp);
-		mmap_read_unlock(current->mm);
-
-		if (retval <= 0)
+		max_pages = min(pages, (unsigned long)PAGE_SIZE);
+		retval = query(start, max_pages, tmp);
+		if (retval < 0)
 			break;
+		if (!retval) {
+			retval = -ENOMEM;
+			break;
+		}
+		if ((unsigned long)retval > max_pages) {
+			retval = -EIO;
+			break;
+		}
 		if (copy_to_user(vec, tmp, retval)) {
 			retval = -EFAULT;
 			break;
@@ -81,4 +93,10 @@ SYSCALL_DEFINE3(mincore, unsigned long, start, size_t, len,
 
 	free_page((unsigned long)tmp);
 	return retval;
+}
+
+SYSCALL_DEFINE3(mincore, unsigned long, start, size_t, len,
+		unsigned char __user *, vec)
+{
+	return nommu_mincore(start, len, vec, nommu_do_mincore);
 }

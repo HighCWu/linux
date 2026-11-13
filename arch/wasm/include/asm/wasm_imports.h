@@ -103,6 +103,8 @@ int wasm_import(user_brk_v1, layout)(u64 fields[3]);
 unsigned long wasm_import(user_brk_v1, update)(unsigned long requested);
 long wasm_import(user_v2, msync)(unsigned long addr, unsigned long len, int flags);
 long wasm_import(user_v2, madvise)(unsigned long addr, unsigned long len, int advice);
+long wasm_import(user_mmap_query_v1, span)(unsigned long address,
+					    unsigned long pages);
 long wasm_import(user_v2, mmap_fixed)(unsigned long addr, unsigned long len);
 long wasm_import(user_v2, mremap_fixed)(unsigned long addr, unsigned long old_len,
 		unsigned long new_len, unsigned long new_addr);

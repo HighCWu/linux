@@ -1,6 +1,7 @@
 #include <linux/entry-common.h>
 #include <linux/mman.h>
 #include <linux/mm.h>
+#include <linux/nommu_mincore.h>
 #include <linux/overflow.h>
 #include <linux/preempt.h>
 #include <linux/rcupdate.h>
@@ -9,6 +10,7 @@
 #include <linux/sched/signal.h>
 #include <linux/seccomp.h>
 #include <linux/syscalls.h>
+#include <linux/string.h>
 #ifdef CONFIG_WASM_MMAP_COPY_TEST
 #include <linux/slab.h>
 #endif
@@ -16,6 +18,28 @@
 #include <asm/remote_vm.h>
 #include <asm/mmap_file.h>
 #include <asm/wasm_imports.h>
+
+static long wasm_mincore_query(unsigned long start, unsigned long pages,
+			       unsigned char *vec)
+{
+	long resident = wasm_user_mmap_query_v1_span(start, pages);
+
+	if (!resident)
+		return -ENOMEM;
+	if (resident < 0)
+		return resident;
+	if ((unsigned long)resident > pages)
+		return -EIO;
+
+	memset(vec, 1, (size_t)resident);
+	return resident;
+}
+
+SYSCALL_DEFINE3(wasm_mincore, unsigned long, start, size_t, len,
+		unsigned char __user *, vec)
+{
+	return nommu_mincore(start, len, vec, wasm_mincore_query);
+}
 
 /* SysV shmget/shmctl operate on kernel-managed metadata and use ordinary
  * uaccess. NOMMU shmat/shmdt instead expose a kernel-linear mapping address

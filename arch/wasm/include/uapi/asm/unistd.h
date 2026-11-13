@@ -16,7 +16,10 @@
 #define __ARCH_WANT_NO_MEMORY_SYSCALLS
 #define __ARCH_WANT_NO_RT_SIGRETURN
 
+/* Keep the generic syscall number and use the Wasm mapping query. */
+#define sys_mincore sys_wasm_mincore
 #include <asm-generic/unistd.h>
+#undef sys_mincore
 
 /*
  * wasm keeps the generic NOMMU memory syscalls disabled: their VMA and file
