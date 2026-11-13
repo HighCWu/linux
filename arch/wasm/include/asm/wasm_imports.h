@@ -17,6 +17,8 @@ void wasm_import(kernel, breakpoint)(void);
 void wasm_import(kernel, halt_worker)(void);
 /* Returns 1 when the runtime has cooperative work sources, otherwise 0. */
 int wasm_import(kernel, worker_checkpoint_v1)(void);
+/* Bounded metadata step: 0 no source, 1 resumable, 2 user return blocked. */
+int wasm_import(kernel, worker_checkpoint_v2)(void);
 
 /* Whole-machine lifecycle event. Values are part of the guest/host ABI. */
 enum wasm_machine_termination_reason {

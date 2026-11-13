@@ -1,6 +1,7 @@
 #include <asm/smp.h>
 #include <asm/timex.h>
 #include <asm/wasm_imports.h>
+#include <asm/worker_checkpoint.h>
 #include <linux/cpu.h>
 #include <linux/bitops.h>
 #include <linux/hardirq.h>
@@ -56,7 +57,7 @@ void __cpuidle arch_cpu_idle(void)
 	int ret;
 
 	/* This is an unlocked idle boundary; never call the host from spin paths. */
-	has_work_source = wasm_kernel_worker_checkpoint_v1() == 1;
+	has_work_source = wasm_worker_checkpoint_update(current);
 
 	if (deadline == 0) {
 		timeout_ns = -1; // forever

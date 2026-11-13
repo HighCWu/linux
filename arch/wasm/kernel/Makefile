@@ -18,7 +18,8 @@ obj-y += \
 	stacktrace.o \
 	syscall.o \
 	time.o \
-	user_context.o
+	user_context.o \
+	worker_checkpoint.o
 
 obj-$(CONFIG_SMP) += smp.o
 obj-$(CONFIG_WASM_ELF_CONTAINER) += elf_container.o

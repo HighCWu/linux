@@ -5,6 +5,7 @@
 #include <asm/sysmem.h>
 #include <asm/user_context.h>
 #include <asm/wasm_imports.h>
+#include <asm/worker_checkpoint.h>
 #include <linux/entry-common.h>
 #include <linux/preempt.h>
 #include <linux/sched.h>
@@ -141,7 +142,7 @@ struct task_struct *__switch_to(struct task_struct *from,
 		 * services Worker publication metadata; it neither runs guest code nor
 		 * reenters the kernel. Bound the wait only when that work source exists.
 		 */
-		if (wasm_kernel_worker_checkpoint_v1() == 1)
+		if (wasm_worker_checkpoint_update(from))
 			timeout_ns = WASM_WORKER_CHECKPOINT_TIMEOUT_NS;
 		else
 			timeout_ns = -1;

@@ -1,5 +1,6 @@
 #include <asm/wasm_imports.h>
 #include <asm/user_context.h>
+#include <asm/worker_checkpoint.h>
 #include <asm/unistd.h>
 #include <linux/entry-common.h>
 #include <linux/errno.h>
@@ -293,6 +294,8 @@ void arch_do_signal_or_restart(struct pt_regs *regs)
 {
 	struct ksignal ksig;
 
+	/* A prior schedule may have acknowledged a provisional module graph. */
+	wasm_worker_checkpoint_wait();
 	if (get_signal(&ksig)) {
 		syscall_restart(regs, true, &ksig.ka);
 		call_signal_handler(&ksig, regs);

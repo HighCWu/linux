@@ -4,6 +4,7 @@
 #include <linux/panic.h>
 #include <asm/user_context.h>
 #include <asm/wasm_imports.h>
+#include <asm/worker_checkpoint.h>
 
 void noinstr wasm_set_user_context(bool user)
 {
@@ -43,6 +44,13 @@ wasm_user_context_v1(unsigned int mode)
 
 void noinstr wasm_run_user(void)
 {
+	/*
+	 * New clones have not initialized their user signal stack yet. Only
+	 * service the module barrier here, without generic user-return work.
+	 */
+	instrumentation_begin();
+	wasm_worker_checkpoint_wait();
+	instrumentation_end();
 	wasm_set_user_context(true);
 	wasm_user_call();
 	wasm_set_user_context(false);

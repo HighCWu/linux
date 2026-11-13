@@ -66,4 +66,7 @@ struct thread_info {
 
 #include <asm-generic/thread_info_tif.h>
 
+#define TIF_WASM_WORKER_BARRIER 16
+#define _TIF_WASM_WORKER_BARRIER BIT(TIF_WASM_WORKER_BARRIER)
+
 #endif

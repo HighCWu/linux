@@ -18,6 +18,7 @@
 #include <asm/remote_vm.h>
 #include <asm/mmap_file.h>
 #include <asm/wasm_imports.h>
+#include <asm/worker_checkpoint.h>
 
 static long wasm_mincore_query(unsigned long start, unsigned long pages,
 			       unsigned char *vec)
@@ -252,6 +253,8 @@ static noinstr int wasm_user_maintenance(u32 flags)
 	wasm_timer_check();
 	if (allow_schedule && need_resched())
 		schedule();
+	if (allow_schedule)
+		wasm_worker_checkpoint_wait();
 
 	/* Restore the interrupted user register image without running signal,
 	 * ptrace, syscall-exit, or other user-return preparation. */
