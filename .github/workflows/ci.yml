@@ -5,6 +5,15 @@ on:
     branches:
       - "**"
   workflow_dispatch:
+    inputs:
+      profile:
+        description: Kernel profile
+        type: choice
+        options:
+          - raw
+          - file-mmap
+        default: raw
+        required: true
 
 permissions:
   contents: read
@@ -21,9 +30,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: NixOS/nix-installer-action@main
-      - run: nix build ".#${{ matrix.variant }}" --print-build-logs
-      - run: cp -L result linux.tgz
+      - id: build
+        name: Build and stage selected kernel profile
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_PROFILE: ${{ inputs.profile }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            push) profile=raw ;;
+            workflow_dispatch)
+              case "$REQUESTED_PROFILE" in
+                raw) profile=raw ;;
+                file-mmap) profile=file-mmap ;;
+                *) echo "unsupported kernel profile" >&2; exit 2 ;;
+              esac
+              ;;
+            *) echo "unsupported workflow event" >&2; exit 2 ;;
+          esac
+          case "$VARIANT" in
+            wasm32|wasm64) ;;
+            *) echo "unsupported kernel architecture" >&2; exit 2 ;;
+          esac
+
+          if [[ "$profile" == raw ]]; then
+            nix build ".#${VARIANT}" --print-build-logs
+            cp -L result linux.tgz
+            artifact_name="kernel-${VARIANT}"
+            artifact_path=linux.tgz
+          else
+            nix build ".#${VARIANT}-file-mmap" --print-build-logs
+            mkdir -p kernel-file-mmap
+            cp -L result/vmlinux.wasm kernel-file-mmap/vmlinux.wasm
+            cp -L result/kernel.config kernel-file-mmap/kernel.config
+            cp -L result/profile.txt kernel-file-mmap/profile.txt
+            cp -L result/COPYING kernel-file-mmap/COPYING
+            cp -R -L result/LICENSES kernel-file-mmap/LICENSES
+            source_commit="$(git rev-parse HEAD)"
+            kernel_sha256="$(sha256sum kernel-file-mmap/vmlinux.wasm | awk '{print $1}')"
+            config_sha256="$(sha256sum kernel-file-mmap/kernel.config | awk '{print $1}')"
+            printf '{\n  "source_commit": "%s",\n  "vmlinux_sha256": "%s",\n  "kernel_config_sha256": "%s"\n}\n' \
+              "$source_commit" "$kernel_sha256" "$config_sha256" \
+              > kernel-file-mmap/build-metadata.json
+            artifact_name="kernel-${VARIANT}-file-mmap"
+            artifact_path=kernel-file-mmap
+          fi
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "artifact_path=$artifact_path" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ matrix.variant }}
-          path: linux.tgz
+          name: ${{ steps.build.outputs.artifact_name }}
+          path: ${{ steps.build.outputs.artifact_path }}
