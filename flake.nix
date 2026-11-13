@@ -53,7 +53,7 @@
                     if fileMmap then
                       ''
                         make HOSTCC=$HOSTCC -j$NIX_BUILD_CORES ${defconfig}
-                        scripts/config --enable WASM_FILE_MMAP --enable WASM_FILE_MMAP_STREAM
+                        bash scripts/config --enable WASM_FILE_MMAP --enable WASM_FILE_MMAP_STREAM
                         make HOSTCC=$HOSTCC -j$NIX_BUILD_CORES olddefconfig
                         grep -qx 'CONFIG_WASM_FILE_MMAP=y' .config
                         grep -qx 'CONFIG_WASM_FILE_MMAP_STREAM=y' .config
