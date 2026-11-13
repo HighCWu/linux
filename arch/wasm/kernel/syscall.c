@@ -4,6 +4,7 @@
 #include <linux/overflow.h>
 #include <linux/rcupdate.h>
 #include <linux/resource.h>
+#include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/seccomp.h>
 #include <linux/syscalls.h>
@@ -184,6 +185,45 @@ wasm_user_poll_v1(void)
 	instrumentation_end();
 	exit_to_user_mode();
 	return error;
+}
+
+/* Private maintenance boundary for compiler polls inside loader-critical
+ * user operations. Unlike user_poll_v1(), this must not inspect the user
+ * stack or run any user return work: a loader may have temporarily changed
+ * tables and is not a safe point for signal delivery. It only lets RCU,
+ * clockevent timers, and cooperative scheduling make progress. */
+__attribute__((export_name("user_maintenance_v1"))) noinstr int
+wasm_user_maintenance_v1(void)
+{
+	struct pt_regs *regs = current_pt_regs();
+	struct pt_regs saved;
+
+	if (!current_thread_info()->in_user_context)
+		return -EAGAIN;
+	raw_local_irq_disable();
+	enter_from_user_mode(regs);
+	instrumentation_begin();
+	saved = *regs;
+	regs->user_mode = 0;
+	regs->syscall_nr = -1;
+	regs->restart_syscall_nr = -1;
+	regs->syscall_return = 0;
+
+	/* Mark the transition out of userspace only after generic entry has
+	 * reactivated RCU, then service maintenance with IRQs enabled. */
+	rcu_note_context_switch(false);
+	local_irq_enable();
+	wasm_timer_check();
+	if (need_resched())
+		schedule();
+
+	/* Restore the interrupted user register image without running signal,
+	 * ptrace, syscall-exit, or other user-return preparation. */
+	local_irq_disable();
+	*regs = saved;
+	instrumentation_end();
+	exit_to_user_mode();
+	return 0;
 }
 
 /* Hosts predating this reviewed nesting contract keep deferring handlers.
