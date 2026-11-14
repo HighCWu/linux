@@ -20,7 +20,8 @@
 #define WASM_REMOTE_WAIT_CHUNK_NS	NSEC_PER_SEC
 #define WASM_REMOTE_WAIT_TIMEOUT_NS	(5ULL * NSEC_PER_SEC)
 
-static void release_dynamic_files(struct mm_struct *mm);
+struct wasm_dynamic_file;
+static void release_dynamic_file_list(struct wasm_dynamic_file *pin);
 
 struct wasm_remote_request {
 	struct mm_struct *mm;
@@ -332,7 +333,7 @@ void wasm_remote_mm_shutdown(struct mm_struct *mm)
 	if (slot->host_id)
 		wasm_remote_memory_v1_release(slot->host_id);
 	mutex_unlock(&slot->mutex);
-	release_dynamic_files(mm);
+	wasm_dynamic_file_refs_release(mm);
 }
 
 /* WASM_DYNAMIC_FILE_REFS_BEGIN
@@ -355,6 +356,13 @@ struct wasm_dynamic_file {
 
 DYNAMIC_EXPORT("dynamic_file_pin_abi_v1")
 int wasm_dynamic_file_pin_abi_v1(void)
+{
+	return 1;
+}
+
+/* Internal engine capability for keeping pinned references across mm clone. */
+DYNAMIC_EXPORT("dynamic_file_copy_abi_v1")
+int wasm_dynamic_file_copy_abi_v1(void)
 {
 	return 1;
 }
@@ -440,7 +448,76 @@ int wasm_dynamic_file_unpin_v1(int id)
 	return 0;
 }
 
-static void release_dynamic_files(struct mm_struct *mm)
+static void release_dynamic_file_list(struct wasm_dynamic_file *pin)
+{
+	while (pin) {
+		struct wasm_dynamic_file *next = pin->next;
+
+		fput(pin->file);
+		kfree(pin);
+		pin = next;
+	}
+}
+
+int wasm_dynamic_files_clone(struct mm_struct *old_mm,
+			     struct mm_struct *new_mm)
+{
+	struct wasm_dynamic_file *pin, *head = NULL, *tail = NULL;
+	unsigned int count = 0;
+	int result = 0;
+
+	if (!old_mm || !new_mm || old_mm == new_mm)
+		return -EINVAL;
+
+	mutex_lock(&old_mm->context.remote.mutex);
+	if (!old_mm->context.remote.accepting) {
+		result = -ESRCH;
+		goto unlock;
+	}
+	if (WARN_ON_ONCE(new_mm->context.dynamic_files ||
+			 new_mm->context.dynamic_file_count)) {
+		result = -EBUSY;
+		goto unlock;
+	}
+
+	for (pin = old_mm->context.dynamic_files; pin; pin = pin->next) {
+		struct wasm_dynamic_file *copy;
+
+		copy = kmalloc(sizeof(*copy), GFP_KERNEL);
+		if (!copy) {
+			result = -ENOMEM;
+			break;
+		}
+		copy->next = NULL;
+		copy->file = get_file(pin->file);
+		copy->id = pin->id;
+		if (tail)
+			tail->next = copy;
+		else
+			head = copy;
+		tail = copy;
+		count++;
+	}
+
+	if (!result && count != old_mm->context.dynamic_file_count)
+		result = -EIO;
+	if (!result) {
+		new_mm->context.dynamic_files = head;
+		new_mm->context.dynamic_file_count = count;
+		/* Keep IDs monotonic even if every existing pin was unpinned. */
+		new_mm->context.dynamic_file_next =
+			old_mm->context.dynamic_file_next;
+		head = NULL;
+	}
+
+unlock:
+	mutex_unlock(&old_mm->context.remote.mutex);
+	/* Drop temporary refs after releasing the source lock. */
+	release_dynamic_file_list(head);
+	return result;
+}
+
+void wasm_dynamic_file_refs_release(struct mm_struct *mm)
 {
 	struct wasm_dynamic_file *pin;
 
@@ -449,13 +526,7 @@ static void release_dynamic_files(struct mm_struct *mm)
 	mm->context.dynamic_files = NULL;
 	mm->context.dynamic_file_count = 0;
 	mutex_unlock(&mm->context.remote.mutex);
-	while (pin) {
-		struct wasm_dynamic_file *next = pin->next;
-
-		fput(pin->file);
-		kfree(pin);
-		pin = next;
-	}
+	release_dynamic_file_list(pin);
 }
 #undef DYNAMIC_EXPORT
 /* WASM_DYNAMIC_FILE_REFS_END */
