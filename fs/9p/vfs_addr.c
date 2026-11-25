@@ -125,6 +125,12 @@ static int v9fs_init_request(struct netfs_io_request *rreq, struct file *file)
 	if (fid->iounit)
 		rreq->wsize = min(rreq->wsize, fid->iounit);
 
+#if defined(CONFIG_WASM) && !defined(CONFIG_MMU)
+	if (file && (fid->mode & P9L_DIRECT) &&
+	    (rreq->origin == NETFS_UNBUFFERED_WRITE || rreq->origin == NETFS_DIO_WRITE))
+		__set_bit(NETFS_RREQ_WASM_USER_WRITE_BOUNCE, &rreq->flags);
+#endif
+
 	/* we might need to read from a fid that was opened write-only
 	 * for read-modify-write of page cache, use the writeback fid
 	 * for that */

@@ -6,6 +6,7 @@
  */
 
 #include <linux/export.h>
+#include <linux/slab.h>
 #include <linux/uio.h>
 #include "internal.h"
 
@@ -147,6 +148,18 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 		}
 		ret = 0;
 
+#if defined(CONFIG_WASM) && !defined(CONFIG_MMU)
+		/*
+		 * A bounced 9P request can report an acknowledged prefix if
+		 * an RPC fails after a short write. Publish that progress.
+		 */
+		if (!wreq->iocb && retry && subreq->transferred &&
+		    test_bit(NETFS_RREQ_WASM_USER_WRITE_BOUNCE, &wreq->flags)) {
+			netfs_unbuffered_write_collect(wreq, stream, subreq);
+			break;
+		}
+#endif
+
 		if (!retry) {
 			netfs_unbuffered_write_collect(wreq, stream, subreq);
 			subreq = NULL;
@@ -225,6 +238,9 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 	ssize_t ret, n;
 	size_t len = iov_iter_count(iter);
 	bool async = !is_sync_kiocb(iocb);
+#if defined(CONFIG_WASM) && !defined(CONFIG_MMU)
+	struct kvec bounce = {};
+#endif
 
 	_enter("");
 
@@ -247,7 +263,37 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 				 netfs_write_trace_dio_write :
 				 netfs_write_trace_unbuffered_write));
 
+#if defined(CONFIG_WASM) && !defined(CONFIG_MMU)
+	if (!async && user_backed_iter(iter) &&
+	    test_bit(NETFS_RREQ_WASM_USER_WRITE_BOUNCE, &wreq->flags)) {
+		struct iov_iter source = *iter;
+		size_t count = min3(len, (size_t)wreq->wsize, (size_t)(2 * PAGE_SIZE));
+
+		if (!count) {
+			ret = 0;
+			goto error_put;
+		}
+
+		/* User offsets cannot be pinned as pages in kernel memory. */
+		bounce.iov_base = kmalloc(count, GFP_NOFS);
+		if (!bounce.iov_base) {
+			ret = -ENOMEM;
+			goto error_put;
+		}
+		bounce.iov_len = copy_from_iter(bounce.iov_base, count, &source);
+		if (!bounce.iov_len) {
+			kfree(bounce.iov_base);
+			ret = -EFAULT;
+			goto error_put;
+		}
+		iov_iter_kvec(&wreq->buffer.iter, ITER_SOURCE, &bounce, 1,
+			      bounce.iov_len);
+	} else
+#endif
 	{
+#if defined(CONFIG_WASM) && !defined(CONFIG_MMU)
+		__clear_bit(NETFS_RREQ_WASM_USER_WRITE_BOUNCE, &wreq->flags);
+#endif
 		/* If this is an async op and we're not using a bounce buffer,
 		 * we have to save the source buffer as the iterator is only
 		 * good until we return.  In such a case, extract an iterator
@@ -273,9 +319,8 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 			 */
 			wreq->buffer.iter = *iter;
 		}
-
-		wreq->len = iov_iter_count(&wreq->buffer.iter);
 	}
+	wreq->len = iov_iter_count(&wreq->buffer.iter);
 
 	__set_bit(NETFS_RREQ_USE_IO_ITER, &wreq->flags);
 
@@ -298,6 +343,15 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 			iocb->ki_pos += wreq->transferred;
 			ret = wreq->transferred ?: wreq->error;
 		}
+
+#if defined(CONFIG_WASM) && !defined(CONFIG_MMU)
+		if (bounce.iov_base) {
+			if (ret > 0)
+				iov_iter_advance(iter, ret);
+			iov_iter_kvec(&wreq->buffer.iter, ITER_SOURCE, NULL, 0, 0);
+			kfree(bounce.iov_base);
+		}
+#endif
 
 		netfs_put_request(wreq, netfs_rreq_trace_put_complete);
 	}
