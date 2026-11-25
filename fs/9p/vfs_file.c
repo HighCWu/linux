@@ -348,6 +348,39 @@ out_err:
 	return ret;
 }
 
+#if defined(CONFIG_WASM) && !defined(CONFIG_MMU)
+static ssize_t v9fs_wasm_unbuffered_read(struct kiocb *iocb, struct iov_iter *to)
+{
+	size_t count = min_t(size_t, iov_iter_count(to), 2 * PAGE_SIZE);
+	struct iov_iter bounce;
+	struct kvec vector;
+	ssize_t ret;
+
+	if (!count)
+		return 0;
+
+	/*
+	 * User offsets belong to a separate linear memory and cannot be
+	 * pinned as kernel pages. A large read can complete one chunk at a time.
+	 */
+	vector.iov_base = kmalloc(count, GFP_KERNEL);
+	if (!vector.iov_base)
+		return -ENOMEM;
+	vector.iov_len = count;
+	iov_iter_kvec(&bounce, ITER_DEST, &vector, 1, count);
+	ret = netfs_unbuffered_read_iter(iocb, &bounce);
+	if (ret > 0) {
+		size_t copied = copy_to_iter(vector.iov_base, ret, to);
+
+		/* Only bytes delivered to the caller advance the file position. */
+		iocb->ki_pos -= ret - copied;
+		ret = copied ? (ssize_t)copied : -EFAULT;
+	}
+	kfree(vector.iov_base);
+	return ret;
+}
+#endif
+
 /**
  * v9fs_file_read_iter - read from a file
  * @iocb: The operation parameters
@@ -362,8 +395,13 @@ v9fs_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	p9_debug(P9_DEBUG_VFS, "fid %d count %zu offset %lld\n",
 		 fid->fid, iov_iter_count(to), iocb->ki_pos);
 
-	if (fid->mode & P9L_DIRECT)
+	if (fid->mode & P9L_DIRECT) {
+#if defined(CONFIG_WASM) && !defined(CONFIG_MMU)
+		if (is_sync_kiocb(iocb) && user_backed_iter(to))
+			return v9fs_wasm_unbuffered_read(iocb, to);
+#endif
 		return netfs_unbuffered_read_iter(iocb, to);
+	}
 
 	p9_debug(P9_DEBUG_VFS, "(cached)\n");
 	return netfs_file_read_iter(iocb, to);
