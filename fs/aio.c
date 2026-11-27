@@ -12,6 +12,7 @@
 #define pr_fmt(fmt) "%s: " fmt, __func__
 
 #include <linux/kernel.h>
+#include <linux/err.h>
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/time.h>
@@ -42,6 +43,10 @@
 #include <linux/percpu-refcount.h>
 #include <linux/mount.h>
 #include <linux/pseudo_fs.h>
+
+#ifdef CONFIG_WASM
+#include <asm/wasm_imports.h>
+#endif
 
 #include <linux/uaccess.h>
 #include <linux/nospec.h>
@@ -404,6 +409,90 @@ static void aio_free_ring(struct kioctx *ctx)
 	}
 }
 
+static void aio_unmap_ring(struct kioctx *ctx)
+{
+#ifdef CONFIG_WASM
+	unsigned long base, size, flags;
+
+	spin_lock_irqsave(&ctx->completion_lock, flags);
+	base = READ_ONCE(ctx->mmap_base);
+	size = READ_ONCE(ctx->mmap_size);
+	WRITE_ONCE(ctx->mmap_base, 0);
+	WRITE_ONCE(ctx->mmap_size, 0);
+	spin_unlock_irqrestore(&ctx->completion_lock, flags);
+
+	if (size)
+		wasm_user_munmap(base, size);
+#else
+	if (!ctx->mmap_size)
+		return;
+
+	vm_munmap(ctx->mmap_base, ctx->mmap_size);
+#endif
+}
+
+#ifdef CONFIG_WASM
+static int aio_reserve_user_ring(struct kioctx *ctx)
+{
+	long result;
+	unsigned long addr;
+
+	result = wasm_user_v2_mmap(0, ALIGN(ctx->mmap_size, PAGE_SIZE),
+				   PROT_READ | PROT_WRITE,
+				   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (IS_ERR_VALUE((unsigned long)result))
+		return (int)result;
+
+	addr = (unsigned long)result;
+	if (!PAGE_ALIGNED(addr) ||
+	    !access_ok((void __user *)addr, ctx->mmap_size)) {
+		wasm_user_munmap(addr, ctx->mmap_size);
+		return -ENOMEM;
+	}
+
+	ctx->mmap_base = addr;
+	ctx->user_id = addr;
+	return 0;
+}
+
+static unsigned aio_wasm_read_head(struct kioctx *ctx, unsigned fallback_head)
+{
+	unsigned long base = READ_ONCE(ctx->mmap_base);
+	unsigned head;
+
+	if (!base || atomic_read(&ctx->dead))
+		return fallback_head;
+
+	if (wasm_user_read(&head,
+			   (const void __user *)(base + offsetof(struct aio_ring, head)),
+			   sizeof(head)))
+		return fallback_head;
+
+	return head;
+}
+
+static void aio_wasm_publish_head(struct kioctx *ctx, unsigned head)
+{
+	unsigned long base = READ_ONCE(ctx->mmap_base);
+
+	if (!base || atomic_read(&ctx->dead))
+		return;
+
+	(void)wasm_user_write((void __user *)(base + offsetof(struct aio_ring, head)),
+			      &head, sizeof(head));
+}
+#else
+static inline unsigned aio_wasm_read_head(struct kioctx *ctx,
+					  unsigned fallback_head)
+{
+	return fallback_head;
+}
+
+static inline void aio_wasm_publish_head(struct kioctx *ctx, unsigned head)
+{
+}
+#endif
+
 static int aio_ring_mremap(struct vm_area_struct *vma)
 {
 	struct file *file = vma->vm_file;
@@ -537,8 +626,13 @@ static const struct address_space_operations aio_ctx_aops = {
 static int aio_setup_ring(struct kioctx *ctx, unsigned int nr_events)
 {
 	struct aio_ring *ring;
+#ifndef CONFIG_WASM
 	struct mm_struct *mm = current->mm;
-	unsigned long size, unused;
+	unsigned long unused;
+#else
+	int ret;
+#endif
+	unsigned long size;
 	int nr_pages;
 	int i;
 	struct file *file;
@@ -597,6 +691,14 @@ static int aio_setup_ring(struct kioctx *ctx, unsigned int nr_events)
 	ctx->mmap_size = nr_pages * PAGE_SIZE;
 	pr_debug("attempting mmap of %lu bytes\n", ctx->mmap_size);
 
+#ifdef CONFIG_WASM
+	ret = aio_reserve_user_ring(ctx);
+	if (ret) {
+		ctx->mmap_size = 0;
+		aio_free_ring(ctx);
+		return ret;
+	}
+#else
 	if (mmap_write_lock_killable(mm)) {
 		ctx->mmap_size = 0;
 		aio_free_ring(ctx);
@@ -616,6 +718,7 @@ static int aio_setup_ring(struct kioctx *ctx, unsigned int nr_events)
 	pr_debug("mmap address: 0x%08lx\n", ctx->mmap_base);
 
 	ctx->user_id = ctx->mmap_base;
+#endif
 	ctx->nr_events = nr_events; /* trusted copy */
 
 	ring = folio_address(ctx->ring_folios[0]);
@@ -628,12 +731,58 @@ static int aio_setup_ring(struct kioctx *ctx, unsigned int nr_events)
 	ring->header_length = sizeof(struct aio_ring);
 	flush_dcache_folio(ctx->ring_folios[0]);
 
+#ifdef CONFIG_WASM
+	if (copy_to_user((void __user *)ctx->mmap_base, ring, sizeof(*ring))) {
+		aio_unmap_ring(ctx);
+		aio_free_ring(ctx);
+		return -EFAULT;
+	}
+#endif
+
 	return 0;
 }
 
 #define AIO_EVENTS_PER_PAGE	(PAGE_SIZE / sizeof(struct io_event))
 #define AIO_EVENTS_FIRST_PAGE	((PAGE_SIZE - sizeof(struct aio_ring)) / sizeof(struct io_event))
 #define AIO_EVENTS_OFFSET	(AIO_EVENTS_PER_PAGE - AIO_EVENTS_FIRST_PAGE)
+
+#ifdef CONFIG_WASM
+static void aio_wasm_publish_event(struct kioctx *ctx, unsigned pos,
+				   const struct io_event *event,
+				   unsigned tail)
+{
+	unsigned long base = READ_ONCE(ctx->mmap_base);
+	unsigned long size = READ_ONCE(ctx->mmap_size);
+	unsigned long event_off;
+
+	if (!base || !size || atomic_read(&ctx->dead))
+		return;
+
+	event_off = (unsigned long)(pos / AIO_EVENTS_PER_PAGE) * PAGE_SIZE +
+		    (unsigned long)(pos % AIO_EVENTS_PER_PAGE) * sizeof(*event);
+	if (event_off + sizeof(*event) > size)
+		return;
+
+	if (wasm_user_write((void __user *)(base + event_off), event,
+			    sizeof(*event)))
+		return;
+
+	/*
+	 * Ensure the completed io_event is visible in user linear memory
+	 * before publishing the updated tail index.
+	 */
+	smp_wmb();
+
+	(void)wasm_user_write((void __user *)(base + offsetof(struct aio_ring, tail)),
+			      &tail, sizeof(tail));
+}
+#else
+static inline void aio_wasm_publish_event(struct kioctx *ctx, unsigned pos,
+					  const struct io_event *event,
+					  unsigned tail)
+{
+}
+#endif
 
 void kiocb_set_cancel_fn(struct kiocb *iocb, kiocb_cancel_fn *cancel)
 {
@@ -781,6 +930,9 @@ static void aio_nr_sub(unsigned nr)
 	spin_unlock(&aio_nr_lock);
 }
 
+static int kill_ioctx(struct mm_struct *mm, struct kioctx *ctx,
+		      struct ctx_rq_wait *wait);
+
 /* ioctx_alloc
  *	Allocates and initializes an ioctx.  Returns an ERR_PTR if it failed.
  */
@@ -870,6 +1022,21 @@ static struct kioctx *ioctx_alloc(unsigned nr_events)
 	if (err)
 		goto err_cleanup;
 
+#ifdef CONFIG_WASM
+	{
+		struct aio_ring *ring = folio_address(ctx->ring_folios[0]);
+		void __user *user_id = (void __user *)(ctx->mmap_base +
+						       offsetof(struct aio_ring, id));
+
+		if (copy_to_user(user_id, &ring->id, sizeof(ring->id))) {
+			mutex_unlock(&ctx->ring_lock);
+			kill_ioctx(mm, ctx, NULL);
+			percpu_ref_put(&ctx->users);
+			return ERR_PTR(-EFAULT);
+		}
+	}
+#endif
+
 	/* Release the ring_lock mutex now that all setup is complete. */
 	mutex_unlock(&ctx->ring_lock);
 
@@ -881,8 +1048,7 @@ err_cleanup:
 	aio_nr_sub(ctx->max_reqs);
 err_ctx:
 	atomic_set(&ctx->dead, 1);
-	if (ctx->mmap_size)
-		vm_munmap(ctx->mmap_base, ctx->mmap_size);
+	aio_unmap_ring(ctx);
 	aio_free_ring(ctx);
 err:
 	mutex_unlock(&ctx->ring_lock);
@@ -927,8 +1093,7 @@ static int kill_ioctx(struct mm_struct *mm, struct kioctx *ctx,
 	 */
 	aio_nr_sub(ctx->max_reqs);
 
-	if (ctx->mmap_size)
-		vm_munmap(ctx->mmap_base, ctx->mmap_size);
+	aio_unmap_ring(ctx);
 
 	ctx->rq_wait = wait;
 	percpu_ref_kill(&ctx->users);
@@ -1082,7 +1247,7 @@ static void user_refill_reqs_available(struct kioctx *ctx)
 		 * safe/right thing.
 		 */
 		ring = folio_address(ctx->ring_folios[0]);
-		head = ring->head;
+		head = aio_wasm_read_head(ctx, ring->head);
 
 		refill_reqs_available(ctx, head, ctx->tail);
 	}
@@ -1212,9 +1377,10 @@ static void aio_complete(struct aio_kiocb *iocb)
 	ctx->tail = tail;
 
 	ring = folio_address(ctx->ring_folios[0]);
-	head = ring->head;
+	head = aio_wasm_read_head(ctx, ring->head);
 	ring->tail = tail;
 	flush_dcache_folio(ctx->ring_folios[0]);
+	aio_wasm_publish_event(ctx, pos, &iocb->ki_res, tail);
 
 	ctx->completed_events++;
 	if (ctx->completed_events > 1)
@@ -1288,7 +1454,7 @@ static long aio_read_events_ring(struct kioctx *ctx,
 
 	/* Access to ->ring_folios here is protected by ctx->ring_lock. */
 	ring = folio_address(ctx->ring_folios[0]);
-	head = ring->head;
+	head = aio_wasm_read_head(ctx, ring->head);
 	tail = ring->tail;
 
 	/*
@@ -1338,6 +1504,7 @@ static long aio_read_events_ring(struct kioctx *ctx,
 	ring = folio_address(ctx->ring_folios[0]);
 	ring->head = head;
 	flush_dcache_folio(ctx->ring_folios[0]);
+	aio_wasm_publish_head(ctx, head);
 
 	pr_debug("%li  h%u t%u\n", ret, head, tail);
 out:
