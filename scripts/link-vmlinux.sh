@@ -94,12 +94,12 @@ vmlinux_link()
 	fi
 
 	# The kallsyms linking does not need debug symbols included.
-	if [ -n "${strip_debug}" ] ; then
+	if [ -n "${strip_debug}" ] && ! is_enabled CONFIG_LD_IS_WASMLD; then
 		ldflags="${ldflags} ${wl}--strip-debug"
 	fi
 
-	if [ -n "${generate_map}" ];  then
-		ldflags="${ldflags} ${wl}-Map=vmlinux.map"
+	if [ -n "${generate_map}" ] || (is_enabled CONFIG_LD_IS_WASMLD && is_enabled CONFIG_KALLSYMS); then
+		ldflags="${ldflags} ${wl}-Map=${output}.map"
 	fi
 
 	if is_enabled CONFIG_LD_IS_WASMLD; then
@@ -124,7 +124,9 @@ kallsyms()
 		kallsymopt="${kallsymopt} --all-symbols"
 	fi
 
-	if is_enabled CONFIG_64BIT || is_enabled CONFIG_RELOCATABLE; then
+	if is_enabled CONFIG_LD_IS_WASMLD; then
+		kallsymopt="${kallsymopt} --wasm"
+	elif is_enabled CONFIG_64BIT || is_enabled CONFIG_RELOCATABLE; then
 		kallsymopt="${kallsymopt} --pc-relative"
 	fi
 
@@ -152,7 +154,11 @@ sysmap_and_kallsyms()
 mksysmap()
 {
 	info NM ${2}
-	${NM} -n "${1}" | sed -f "${srctree}/scripts/mksysmap" > "${2}"
+	if is_enabled CONFIG_LD_IS_WASMLD; then
+		wasm2wat "${1}" --enable-all | perl "${srctree}/arch/wasm/scripts/wasm-mksysmap.pl" "${1}.map" | sed -f "${srctree}/scripts/mksysmap" > "${2}"
+	else
+		${NM} -n "${1}" | sed -f "${srctree}/scripts/mksysmap" > "${2}"
+	fi
 }
 
 sorttable()
@@ -283,7 +289,7 @@ if is_enabled CONFIG_DEBUG_INFO_BTF; then
 	${RESOLVE_BTFIDS} --patch_btfids ${btfids_vmlinux} ${VMLINUX}
 fi
 
-if ! is_enabled CONFIG_LD_IS_WASMLD; then
+if ! is_enabled CONFIG_LD_IS_WASMLD || is_enabled CONFIG_KALLSYMS; then
 	mksysmap "${VMLINUX}" System.map
 fi
 

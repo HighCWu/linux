@@ -152,7 +152,8 @@ static unsigned int get_symbol_offset(unsigned long pos)
 unsigned long kallsyms_sym_address(int idx)
 {
 	/* non-relocatable 32-bit kernels just embed the value directly */
-	if (!IS_ENABLED(CONFIG_64BIT) && !IS_ENABLED(CONFIG_RELOCATABLE))
+	if (IS_ENABLED(CONFIG_WASM) ||
+	    (!IS_ENABLED(CONFIG_64BIT) && !IS_ENABLED(CONFIG_RELOCATABLE)))
 		return (u32)kallsyms_offsets[idx];
 	return (unsigned long)offset_to_ptr(kallsyms_offsets + idx);
 }

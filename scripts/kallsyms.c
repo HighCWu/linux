@@ -57,6 +57,7 @@ static struct sym_entry **table;
 static unsigned int table_size, table_cnt;
 static int all_symbols;
 static int pc_relative;
+static int wasm_mode;
 
 static int token_profit[0x10000];
 
@@ -200,6 +201,12 @@ static int symbol_valid(const struct sym_entry *s)
 	/* if --all-symbols is not specified, then symbols outside the text
 	 * and inittext sections are discarded */
 	if (!all_symbols) {
+		if (wasm_mode) {
+			if (toupper((unsigned char)s->sym[0]) == 'T' ||
+			    toupper((unsigned char)s->sym[0]) == 'W')
+				return 1;
+			return 0;
+		}
 		/*
 		 * Symbols starting with __start and __stop are used to denote
 		 * section boundaries, and should always be included:
@@ -284,6 +291,12 @@ static void output_label(const char *label)
 	printf("%s:\n", label);
 }
 
+static void output_label_end(const char *label)
+{
+	if (wasm_mode)
+		printf("\t.size\t%s, . - %s\n", label, label);
+}
+
 /* uncompress a compressed symbol. When this function is called, the best table
  * might still be compressed itself, so the function needs to be recursive */
 static int expand_symbol(const unsigned char *data, int len, char *result)
@@ -343,10 +356,14 @@ static void write_src(void)
 	unsigned int *markers, markers_cnt;
 	char buf[KSYM_NAME_LEN];
 
-	printf("\t.section .rodata, \"a\"\n");
+	if (wasm_mode)
+		printf("\t.section .rodata.kallsyms,\"\",@\n");
+	else
+		printf("\t.section .rodata, \"a\"\n");
 
 	output_label("kallsyms_num_syms");
 	printf("\t.long\t%u\n", table_cnt);
+	output_label_end("kallsyms_num_syms");
 	printf("\n");
 
 	/* table of offset markers, that give the offset in the compressed stream
@@ -398,11 +415,13 @@ static void write_src(void)
 		strcpy((char *)table[i]->sym, buf);
 		printf("\t/* %s */\n", table[i]->sym);
 	}
+	output_label_end("kallsyms_names");
 	printf("\n");
 
 	output_label("kallsyms_markers");
 	for (i = 0; i < markers_cnt; i++)
 		printf("\t.long\t%u\n", markers[i]);
+	output_label_end("kallsyms_markers");
 	printf("\n");
 
 	free(markers);
@@ -415,11 +434,13 @@ static void write_src(void)
 		printf("\t.asciz\t\"%s\"\n", buf);
 		off += strlen(buf) + 1;
 	}
+	output_label_end("kallsyms_token_table");
 	printf("\n");
 
 	output_label("kallsyms_token_index");
 	for (i = 0; i < 256; i++)
 		printf("\t.short\t%d\n", best_idx[i]);
+	output_label_end("kallsyms_token_index");
 	printf("\n");
 
 	output_label("kallsyms_offsets");
@@ -441,6 +462,7 @@ static void write_src(void)
 			       (unsigned int)table[i]->addr, table[i]->sym);
 		}
 	}
+	output_label_end("kallsyms_offsets");
 	printf("\n");
 
 	sort_symbols_by_name();
@@ -451,6 +473,7 @@ static void write_src(void)
 			(unsigned char)(table[i]->seq >> 8),
 			(unsigned char)(table[i]->seq >> 0),
 		       table[i]->sym);
+	output_label_end("kallsyms_seqs_of_names");
 	printf("\n");
 }
 
@@ -688,6 +711,7 @@ int main(int argc, char **argv)
 		static const struct option long_options[] = {
 			{"all-symbols",     no_argument, &all_symbols,     1},
 			{"pc-relative",     no_argument, &pc_relative,     1},
+			{"wasm",            no_argument, &wasm_mode,       1},
 			{},
 		};
 

@@ -34,7 +34,7 @@ static inline bool is_kernel_inittext(unsigned long addr)
 	return false;
 }
 static inline bool __is_kernel_text(unsigned long addr) {
-	return false;
+	return IS_ENABLED(CONFIG_KALLSYMS) && addr >= 1 && addr < 0x100000;
 }
 
 static inline bool __is_kernel_inittext(unsigned long addr) {
@@ -42,7 +42,7 @@ static inline bool __is_kernel_inittext(unsigned long addr) {
 }
 
 static inline bool __is_kernel(unsigned long addr) {
-	return false;
+	return __is_kernel_text(addr) || is_kernel_core_data(addr);
 }
 
 #define dereference_function_descriptor(p) ((void *)(p))
