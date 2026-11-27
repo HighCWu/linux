@@ -1,8 +1,10 @@
 #define DEBUG
 #define pr_fmt(fmt) "virtio-wasm: " fmt
 
+#include <asm/processor.h>
 #include <asm/wasm_imports.h>
 #include <asm/virtio_snapshot.h>
+#include <linux/atomic.h>
 #include <linux/blkdev.h>
 #include <linux/device.h>
 #include <linux/interrupt.h>
@@ -16,6 +18,7 @@
 #include <linux/virtio_ring.h>
 #include <linux/virtio.h>
 #include <linux/virtio_blk.h>
+#include <linux/virtio_ids.h>
 
 #define to_virtio_wasm_device(_plat_dev) \
 	container_of(_plat_dev, struct virtio_wasm_device, vdev)
@@ -55,6 +58,7 @@ struct vw_set_config_req {
 	struct virtio_wasm_device *vw_dev;
 	u32 offset;
 	u32 len;
+	atomic_t done;
 };
 
 static void _set_config(void *arg)
@@ -62,6 +66,7 @@ static void _set_config(void *arg)
 	struct vw_set_config_req *req = arg;
 
 	wasm_virtio_set_config(req->vw_dev->host_id, req->offset, req->len);
+	atomic_set_release(&req->done, 1);
 }
 #endif
 
@@ -83,8 +88,11 @@ static void vw_set(struct virtio_device *vdev, unsigned offset, const void *buf,
 			.vw_dev = vw_dev,
 			.offset = offset,
 			.len = len,
+			.done = ATOMIC_INIT(0),
 		};
 		wasm_kernel_run_on_main(_set_config, &req);
+		while (!atomic_read_acquire(&req.done))
+			cpu_relax();
 	}
 #endif
 }

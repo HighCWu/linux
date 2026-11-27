@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#include <linux/atomic.h>
 #include <linux/errno.h>
 #include <linux/fb.h>
 #include <linux/init.h>
@@ -8,6 +9,7 @@
 #include <linux/platform_device.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
+#include <asm/processor.h>
 #include <asm/smp.h>
 #include <asm/wasm_imports.h>
 
@@ -21,6 +23,7 @@ struct wasmfb_register_req {
 	u32 height;
 	u32 stride;
 	u32 bpp;
+	atomic_t done;
 };
 
 struct wasmfb_flush_req {
@@ -28,6 +31,7 @@ struct wasmfb_flush_req {
 	u32 y;
 	u32 width;
 	u32 height;
+	atomic_t done;
 };
 
 static void wasmfb_register_on_main(void *arg)
@@ -36,6 +40,7 @@ static void wasmfb_register_on_main(void *arg)
 
 	wasm_fb_register(req->fb_addr, req->width, req->height, req->stride,
 			 req->bpp);
+	atomic_set_release(&req->done, 1);
 }
 
 static void wasmfb_flush_on_main(void *arg)
@@ -43,6 +48,7 @@ static void wasmfb_flush_on_main(void *arg)
 	struct wasmfb_flush_req *req = arg;
 
 	wasm_fb_flush(req->x, req->y, req->width, req->height);
+	atomic_set_release(&req->done, 1);
 }
 
 static void wasmfb_notify_flush(u32 x, u32 y, u32 width, u32 height)
@@ -52,9 +58,12 @@ static void wasmfb_notify_flush(u32 x, u32 y, u32 width, u32 height)
 		.y = y,
 		.width = width,
 		.height = height,
+		.done = ATOMIC_INIT(0),
 	};
 
 	wasm_kernel_run_on_main(wasmfb_flush_on_main, &req);
+	while (!atomic_read_acquire(&req.done))
+		cpu_relax();
 }
 
 static ssize_t wasmfb_write(struct fb_info *info, const char __user *buf,
@@ -185,8 +194,12 @@ static int wasmfb_probe(struct platform_device *pdev)
 	reg_req.height = WASMFB_HEIGHT;
 	reg_req.stride = stride;
 	reg_req.bpp = WASMFB_BPP;
+	atomic_set(&reg_req.done, 0);
 	wasm_kernel_run_on_main(wasmfb_register_on_main, &reg_req);
+	while (!atomic_read_acquire(&reg_req.done))
+		cpu_relax();
 
+	info->flags |= FBINFO_VIRTFB;
 	ret = register_framebuffer(info);
 	if (ret < 0)
 		goto err_fb_release;
