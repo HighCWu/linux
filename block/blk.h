@@ -402,6 +402,15 @@ static inline bool bio_may_need_split(struct bio *bio,
 	bv = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
 	if (bio->bi_iter.bi_size > bv->bv_len - bio->bi_iter.bi_bvec_done)
 		return true;
+	/*
+	 * The single-segment fast path skips bio_split_io_at(), which normally
+	 * validates each vector against dma_alignment.  Keep Wasm I/O on that
+	 * validation path when its current vector is not DMA aligned.
+	 */
+	if (IS_ENABLED(CONFIG_WASM) &&
+	    (((bv->bv_offset + bio->bi_iter.bi_bvec_done) |
+	      bio->bi_iter.bi_size) & lim->dma_alignment))
+		return true;
 	return bv->bv_len + bv->bv_offset > lim->max_fast_segment_size;
 }
 
