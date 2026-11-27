@@ -159,6 +159,12 @@ void wasm_import(virtio, disable_vring)(u32 id, u32 index);
 void wasm_import(virtio, notify)(u32 id, u32 index);
 #endif
 
+#ifdef CONFIG_FB_WASM
+void wasm_import(fb, register)(void *fb_addr, u32 width, u32 height,
+			       u32 stride, u32 bpp);
+void wasm_import(fb, flush)(u32 x, u32 y, u32 width, u32 height);
+#endif
+
 #undef wasm_import
 
 #endif

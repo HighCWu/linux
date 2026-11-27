@@ -5,5 +5,9 @@ config VIRTIO_WASM
 	 This driver supports virtio devices on the WebAssembly platform.
 
 config FB_WASM
-	tristate
+	tristate "WebAssembly linear framebuffer support"
 	depends on FB
+	select FB_SYSMEM_HELPERS
+	help
+	  This driver provides a linear framebuffer (/dev/fb0) in kernel
+	  memory and notifies the WebAssembly host on display updates.
