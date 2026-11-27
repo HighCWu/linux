@@ -293,6 +293,10 @@ static __cold struct io_ring_ctx *io_ring_ctx_alloc(struct io_uring_params *p)
 	INIT_HLIST_HEAD(&ctx->cancelable_uring_cmd);
 	io_napi_init(ctx);
 	mutex_init(&ctx->mmap_lock);
+#ifdef CONFIG_WASM
+	spin_lock_init(&ctx->wasm_shadow_lock);
+	INIT_LIST_HEAD(&ctx->wasm_shadow_node);
+#endif
 
 	return ctx;
 
@@ -1981,6 +1985,7 @@ static void io_commit_sqring(struct io_ring_ctx *ctx)
 		 */
 		smp_store_release(&rings->sq.head, ctx->cached_sq_head);
 	}
+	io_wasm_publish_sq(ctx);
 }
 
 /*
@@ -2450,6 +2455,7 @@ static int io_uring_release(struct inode *inode, struct file *file)
 	struct io_ring_ctx *ctx = file->private_data;
 
 	file->private_data = NULL;
+	io_wasm_release_shadow(ctx);
 	io_ring_ctx_wait_and_kill(ctx);
 	return 0;
 }
@@ -2620,6 +2626,8 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 	if (unlikely(smp_load_acquire(&ctx->flags) & IORING_SETUP_R_DISABLED))
 		goto out;
 
+	io_wasm_sync_from_user(ctx);
+
 	if (io_has_loop_ops(ctx)) {
 		ret = io_run_loop(ctx);
 		goto out;
@@ -2705,6 +2713,7 @@ iopoll_locked:
 		}
 	}
 out:
+	io_wasm_publish_cq(ctx);
 	if (!(flags & IORING_ENTER_REGISTERED_RING))
 		fput(file);
 	return ret;
@@ -2805,6 +2814,11 @@ static int io_uring_sanitise_params(struct io_uring_params *p)
 
 	if (flags & ~IORING_SETUP_FLAGS)
 		return -EINVAL;
+
+#ifdef CONFIG_WASM
+	if (flags & (IORING_SETUP_SQPOLL | IORING_SETUP_NO_MMAP))
+		return -EOPNOTSUPP;
+#endif
 
 	if (flags & IORING_SETUP_SQ_REWIND) {
 		if ((flags & IORING_SETUP_SQPOLL) ||

@@ -504,6 +504,18 @@ struct io_ring_ctx {
 	struct io_mapped_region		ring_region;
 	/* used for optimised request parameter and wait argument passing  */
 	struct io_mapped_region		param_region;
+#ifdef CONFIG_WASM
+	spinlock_t			wasm_shadow_lock;
+	struct mm_struct		*wasm_mm;
+	struct list_head		wasm_shadow_node;
+	unsigned long			wasm_sq_user_addr;
+	unsigned long			wasm_sq_user_size;
+	unsigned long			wasm_cq_user_addr;
+	unsigned long			wasm_cq_user_size;
+	unsigned long			wasm_sqes_user_addr;
+	unsigned long			wasm_sqes_user_size;
+	u32				wasm_published_cq_tail;
+#endif
 };
 
 /*

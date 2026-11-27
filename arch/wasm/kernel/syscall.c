@@ -1,4 +1,5 @@
 #include <linux/entry-common.h>
+#include <linux/io_uring.h>
 #include <linux/mman.h>
 #include <linux/mm.h>
 #include <linux/nommu_mincore.h>
@@ -407,6 +408,12 @@ SYSCALL_DEFINE6(wasm_mmap, unsigned long, addr, size_t, len, unsigned long, prot
 	const unsigned long supported_flags = MAP_PRIVATE | MAP_ANONYMOUS |
 		MAP_FIXED | MAP_FIXED_NOREPLACE | advisory_flags;
 
+	if (!(flags & MAP_ANONYMOUS)) {
+		long uring_ret = wasm_io_uring_mmap(addr, len, prot, flags, fd,
+						      pgoff);
+		if (uring_ret != -ENOIOCTLCMD)
+			return uring_ret;
+	}
 #ifdef CONFIG_WASM_FILE_MMAP
 	if (!(flags & MAP_ANONYMOUS))
 		return wasm_mmap_file(addr, len, prot, flags, fd, pgoff);
@@ -553,6 +560,7 @@ SYSCALL_DEFINE2(wasm_munmap, unsigned long, addr, size_t, len)
 	if (check_add_overflow(addr, rounded, &addr) || addr > TASK_SIZE)
 		return -EINVAL;
 
+	wasm_io_uring_munmap(current->mm, addr - rounded, rounded);
 	return wasm_user_munmap(addr - rounded, rounded);
 }
 

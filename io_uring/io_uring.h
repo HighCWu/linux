@@ -409,10 +409,31 @@ static inline void io_ring_submit_lock(struct io_ring_ctx *ctx,
 	lockdep_assert_held(&ctx->uring_lock);
 }
 
+#ifdef CONFIG_WASM
+void io_wasm_sync_from_user(struct io_ring_ctx *ctx);
+void io_wasm_publish_sq(struct io_ring_ctx *ctx);
+void io_wasm_publish_cq(struct io_ring_ctx *ctx);
+void io_wasm_release_shadow(struct io_ring_ctx *ctx);
+#else
+static inline void io_wasm_sync_from_user(struct io_ring_ctx *ctx)
+{
+}
+static inline void io_wasm_publish_sq(struct io_ring_ctx *ctx)
+{
+}
+static inline void io_wasm_publish_cq(struct io_ring_ctx *ctx)
+{
+}
+static inline void io_wasm_release_shadow(struct io_ring_ctx *ctx)
+{
+}
+#endif
+
 static inline void io_commit_cqring(struct io_ring_ctx *ctx)
 {
 	/* order cqe stores with ring update */
 	smp_store_release(&ctx->rings->cq.tail, ctx->cached_cq_tail);
+	io_wasm_publish_cq(ctx);
 }
 
 static inline void __io_wq_wake(struct wait_queue_head *wq)

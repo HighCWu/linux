@@ -60,4 +60,22 @@ static inline int io_uring_fork(struct task_struct *tsk)
 }
 #endif
 
+#if defined(CONFIG_WASM) && defined(CONFIG_IO_URING)
+long wasm_io_uring_mmap(unsigned long addr, size_t len, unsigned long prot,
+			unsigned long flags, long fd, unsigned long pgoff);
+void wasm_io_uring_munmap(struct mm_struct *mm, unsigned long addr,
+			  unsigned long len);
+#else
+static inline long wasm_io_uring_mmap(unsigned long addr, size_t len,
+				      unsigned long prot, unsigned long flags,
+				      long fd, unsigned long pgoff)
+{
+	return -ENOIOCTLCMD;
+}
+static inline void wasm_io_uring_munmap(struct mm_struct *mm,
+					unsigned long addr, unsigned long len)
+{
+}
+#endif
+
 #endif

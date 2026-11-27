@@ -8,8 +8,14 @@
 #include <linux/vmalloc.h>
 #include <linux/io_uring.h>
 #include <linux/io_uring_types.h>
+#include <linux/file.h>
+#include <linux/uaccess.h>
 #include <asm/shmparam.h>
+#ifdef CONFIG_WASM
+#include <asm/wasm_imports.h>
+#endif
 
+#include "io_uring.h"
 #include "memmap.h"
 #include "kbuf.h"
 #include "rsrc.h"
@@ -435,5 +441,391 @@ unsigned long io_uring_get_unmapped_area(struct file *file, unsigned long addr,
 
 	return (unsigned long) ptr;
 }
+
+#ifdef CONFIG_WASM
+static LIST_HEAD(io_wasm_shadow_list);
+static DEFINE_SPINLOCK(io_wasm_shadow_list_lock);
+
+static bool io_wasm_ranges_overlap(unsigned long a_start, unsigned long a_len,
+				   unsigned long b_start, unsigned long b_len)
+{
+	return a_len && b_len && a_start < b_start + b_len &&
+	       b_start < a_start + a_len;
+}
+
+long wasm_io_uring_mmap(unsigned long addr, size_t len, unsigned long prot,
+			unsigned long flags, long fd, unsigned long pgoff)
+{
+	const unsigned long advisory_flags = MAP_NORESERVE | MAP_POPULATE |
+		MAP_NONBLOCK;
+	struct file *file;
+	struct io_ring_ctx *ctx;
+	struct io_mapped_region *region;
+	unsigned long *slot_addr = NULL, *slot_size = NULL;
+	unsigned long old_addr = 0, old_size = 0;
+	unsigned long aligned_len;
+	unsigned long uaddr;
+	loff_t offset;
+	long ret;
+
+	if (fd < 0 || fd > INT_MAX)
+		return -EBADF;
+	file = fget((unsigned int)fd);
+	if (!file)
+		return -EBADF;
+	if (!io_is_uring_fops(file)) {
+		fput(file);
+		return -ENOIOCTLCMD;
+	}
+
+	if (addr || !len) {
+		ret = -EINVAL;
+		goto out_fput;
+	}
+	if ((flags & MAP_TYPE) != MAP_SHARED ||
+	    (flags & ~(MAP_SHARED | advisory_flags))) {
+		ret = -EINVAL;
+		goto out_fput;
+	}
+	if (!prot || (prot & ~(PROT_READ | PROT_WRITE))) {
+		ret = -EINVAL;
+		goto out_fput;
+	}
+#ifdef CONFIG_64BIT
+	if (!PAGE_ALIGNED(pgoff)) {
+		ret = -EINVAL;
+		goto out_fput;
+	}
+	offset = (loff_t)pgoff;
+#else
+	if (pgoff & ((PAGE_SIZE >> 12) - 1)) {
+		ret = -EINVAL;
+		goto out_fput;
+	}
+	offset = (loff_t)pgoff << 12;
+#endif
+	if (len > ULONG_MAX - (PAGE_SIZE - 1)) {
+		ret = -ENOMEM;
+		goto out_fput;
+	}
+	aligned_len = PAGE_ALIGN(len);
+
+	ctx = file->private_data;
+	mutex_lock(&ctx->mmap_lock);
+	switch (offset & IORING_OFF_MMAP_MASK) {
+	case IORING_OFF_SQ_RING:
+		region = &ctx->ring_region;
+		slot_addr = &ctx->wasm_sq_user_addr;
+		slot_size = &ctx->wasm_sq_user_size;
+		break;
+	case IORING_OFF_CQ_RING:
+		region = &ctx->ring_region;
+		slot_addr = &ctx->wasm_cq_user_addr;
+		slot_size = &ctx->wasm_cq_user_size;
+		break;
+	case IORING_OFF_SQES:
+		region = &ctx->sq_region;
+		slot_addr = &ctx->wasm_sqes_user_addr;
+		slot_size = &ctx->wasm_sqes_user_size;
+		break;
+	default:
+		mutex_unlock(&ctx->mmap_lock);
+		ret = -EINVAL;
+		goto out_fput;
+	}
+
+	if (!io_region_is_set(region) ||
+	    (region->flags & IO_REGION_F_USER_PROVIDED) ||
+	    aligned_len > io_region_size(region)) {
+		mutex_unlock(&ctx->mmap_lock);
+		ret = -EINVAL;
+		goto out_fput;
+	}
+
+	ret = wasm_user_v2_mmap(0, aligned_len, PROT_READ | PROT_WRITE,
+				MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (IS_ERR_VALUE((unsigned long)ret)) {
+		mutex_unlock(&ctx->mmap_lock);
+		goto out_fput;
+	}
+	uaddr = (unsigned long)ret;
+	if (!PAGE_ALIGNED(uaddr) ||
+	    !access_ok((void __user *)uaddr, aligned_len)) {
+		wasm_user_munmap(uaddr, aligned_len);
+		mutex_unlock(&ctx->mmap_lock);
+		ret = -ENOMEM;
+		goto out_fput;
+	}
+
+	if (wasm_user_write((void __user *)uaddr, region->ptr, aligned_len)) {
+		wasm_user_munmap(uaddr, aligned_len);
+		mutex_unlock(&ctx->mmap_lock);
+		ret = -EFAULT;
+		goto out_fput;
+	}
+
+	spin_lock(&ctx->wasm_shadow_lock);
+	if (!ctx->wasm_mm)
+		ctx->wasm_mm = current->mm;
+	old_addr = *slot_addr;
+	old_size = *slot_size;
+	*slot_addr = uaddr;
+	*slot_size = aligned_len;
+	spin_unlock(&ctx->wasm_shadow_lock);
+
+	spin_lock(&io_wasm_shadow_list_lock);
+	if (list_empty(&ctx->wasm_shadow_node))
+		list_add(&ctx->wasm_shadow_node, &io_wasm_shadow_list);
+	spin_unlock(&io_wasm_shadow_list_lock);
+
+	mutex_unlock(&ctx->mmap_lock);
+
+	if (old_size)
+		wasm_user_munmap(old_addr, old_size);
+
+	fput(file);
+	return (long)uaddr;
+
+out_fput:
+	fput(file);
+	return ret;
+}
+
+void wasm_io_uring_munmap(struct mm_struct *mm, unsigned long addr,
+			  unsigned long len)
+{
+	struct io_ring_ctx *ctx;
+
+	if (!mm || !len || list_empty(&io_wasm_shadow_list))
+		return;
+
+	spin_lock(&io_wasm_shadow_list_lock);
+	list_for_each_entry(ctx, &io_wasm_shadow_list, wasm_shadow_node) {
+		if (ctx->wasm_mm != mm)
+			continue;
+		spin_lock(&ctx->wasm_shadow_lock);
+		if (io_wasm_ranges_overlap(ctx->wasm_sq_user_addr,
+					   ctx->wasm_sq_user_size, addr, len)) {
+			ctx->wasm_sq_user_addr = 0;
+			ctx->wasm_sq_user_size = 0;
+		}
+		if (io_wasm_ranges_overlap(ctx->wasm_cq_user_addr,
+					   ctx->wasm_cq_user_size, addr, len)) {
+			ctx->wasm_cq_user_addr = 0;
+			ctx->wasm_cq_user_size = 0;
+		}
+		if (io_wasm_ranges_overlap(ctx->wasm_sqes_user_addr,
+					   ctx->wasm_sqes_user_size, addr, len)) {
+			ctx->wasm_sqes_user_addr = 0;
+			ctx->wasm_sqes_user_size = 0;
+		}
+		spin_unlock(&ctx->wasm_shadow_lock);
+	}
+	spin_unlock(&io_wasm_shadow_list_lock);
+}
+
+void io_wasm_release_shadow(struct io_ring_ctx *ctx)
+{
+	unsigned long sq_addr, sq_size, cq_addr, cq_size, sqes_addr, sqes_size;
+	bool can_unmap;
+
+	spin_lock(&io_wasm_shadow_list_lock);
+	if (!list_empty(&ctx->wasm_shadow_node))
+		list_del_init(&ctx->wasm_shadow_node);
+	spin_unlock(&io_wasm_shadow_list_lock);
+
+	spin_lock(&ctx->wasm_shadow_lock);
+	sq_addr = ctx->wasm_sq_user_addr;
+	sq_size = ctx->wasm_sq_user_size;
+	cq_addr = ctx->wasm_cq_user_addr;
+	cq_size = ctx->wasm_cq_user_size;
+	sqes_addr = ctx->wasm_sqes_user_addr;
+	sqes_size = ctx->wasm_sqes_user_size;
+	ctx->wasm_sq_user_addr = 0;
+	ctx->wasm_sq_user_size = 0;
+	ctx->wasm_cq_user_addr = 0;
+	ctx->wasm_cq_user_size = 0;
+	ctx->wasm_sqes_user_addr = 0;
+	ctx->wasm_sqes_user_size = 0;
+	can_unmap = current->mm && current->mm == ctx->wasm_mm &&
+		    !(current->flags & PF_EXITING);
+	spin_unlock(&ctx->wasm_shadow_lock);
+
+	if (can_unmap) {
+		if (sq_size)
+			wasm_user_munmap(sq_addr, sq_size);
+		if (cq_size)
+			wasm_user_munmap(cq_addr, cq_size);
+		if (sqes_size)
+			wasm_user_munmap(sqes_addr, sqes_size);
+	}
+}
+
+void io_wasm_sync_from_user(struct io_ring_ctx *ctx)
+{
+	struct io_rings *rings = ctx->rings;
+	unsigned long sq_addr, sq_size, cq_addr, cq_size, sqes_addr, sqes_size;
+	unsigned long array_off;
+	size_t sqe_size;
+	u32 sq_tail, cq_head, head, count, i, mask;
+
+	if (!rings || !current->mm || current->mm != ctx->wasm_mm)
+		return;
+
+	spin_lock(&ctx->wasm_shadow_lock);
+	sq_addr = ctx->wasm_sq_user_addr;
+	sq_size = ctx->wasm_sq_user_size;
+	cq_addr = ctx->wasm_cq_user_addr;
+	cq_size = ctx->wasm_cq_user_size;
+	sqes_addr = ctx->wasm_sqes_user_addr;
+	sqes_size = ctx->wasm_sqes_user_size;
+
+	if (sq_addr && sq_size >= sizeof(*rings)) {
+		if (!wasm_user_read(&sq_tail,
+				    (const void __user *)(sq_addr + offsetof(struct io_rings, sq.tail)),
+				    sizeof(sq_tail))) {
+			WRITE_ONCE(rings->sq.tail, sq_tail);
+			head = ctx->cached_sq_head;
+			count = min_t(u32, sq_tail - head, ctx->sq_entries);
+			mask = ctx->sq_entries - 1;
+			sqe_size = (ctx->flags & IORING_SETUP_SQE128) ?
+				   2 * sizeof(struct io_uring_sqe) :
+				   sizeof(struct io_uring_sqe);
+
+			if (!(ctx->flags & IORING_SETUP_NO_SQARRAY) && ctx->sq_array) {
+				array_off = (unsigned long)((char *)ctx->sq_array - (char *)rings);
+				for (i = 0; i < count; i++) {
+					u32 ring_idx = (head + i) & mask;
+					u32 sqe_idx = 0;
+					unsigned long elem_off = array_off + ring_idx * sizeof(u32);
+
+					if (elem_off + sizeof(u32) > sq_size)
+						break;
+					if (wasm_user_read(&sqe_idx,
+							   (const void __user *)(sq_addr + elem_off),
+							   sizeof(sqe_idx)))
+						break;
+					ctx->sq_array[ring_idx] = sqe_idx;
+					if (sqes_addr && sqe_idx < ctx->sq_entries &&
+					    (unsigned long)(sqe_idx + 1) * sqe_size <= sqes_size) {
+						unsigned long dst_idx = (ctx->flags & IORING_SETUP_SQE128) ?
+									(sqe_idx << 1) : sqe_idx;
+
+						(void)wasm_user_read(&ctx->sq_sqes[dst_idx],
+								     (const void __user *)(sqes_addr + sqe_idx * sqe_size),
+								     sqe_size);
+					}
+				}
+			} else if (sqes_addr) {
+				for (i = 0; i < count; i++) {
+					u32 sqe_idx = (head + i) & mask;
+					unsigned long dst_idx = (ctx->flags & IORING_SETUP_SQE128) ?
+								(sqe_idx << 1) : sqe_idx;
+
+					if ((unsigned long)(sqe_idx + 1) * sqe_size > sqes_size)
+						break;
+					(void)wasm_user_read(&ctx->sq_sqes[dst_idx],
+							     (const void __user *)(sqes_addr + sqe_idx * sqe_size),
+							     sqe_size);
+				}
+			}
+		}
+	}
+
+	if (!cq_addr) {
+		cq_addr = sq_addr;
+		cq_size = sq_size;
+	}
+	if (cq_addr && cq_size >= sizeof(*rings)) {
+		if (!wasm_user_read(&cq_head,
+				    (const void __user *)(cq_addr + offsetof(struct io_rings, cq.head)),
+				    sizeof(cq_head)))
+			WRITE_ONCE(rings->cq.head, cq_head);
+	}
+	spin_unlock(&ctx->wasm_shadow_lock);
+	smp_rmb();
+}
+
+void io_wasm_publish_sq(struct io_ring_ctx *ctx)
+{
+	struct io_rings *rings = ctx->rings;
+	u32 sq_head, sq_dropped, sq_flags;
+
+	if (!rings || !current->mm || current->mm != ctx->wasm_mm)
+		return;
+
+	spin_lock(&ctx->wasm_shadow_lock);
+	if (ctx->wasm_sq_user_addr && ctx->wasm_sq_user_size >= sizeof(*rings)) {
+		sq_head = READ_ONCE(rings->sq.head);
+		sq_dropped = READ_ONCE(rings->sq_dropped);
+		sq_flags = (u32)atomic_read(&rings->sq_flags);
+		(void)wasm_user_write((void __user *)(ctx->wasm_sq_user_addr +
+						      offsetof(struct io_rings, sq.head)),
+				      &sq_head, sizeof(sq_head));
+		(void)wasm_user_write((void __user *)(ctx->wasm_sq_user_addr +
+						      offsetof(struct io_rings, sq_dropped)),
+				      &sq_dropped, sizeof(sq_dropped));
+		(void)wasm_user_write((void __user *)(ctx->wasm_sq_user_addr +
+						      offsetof(struct io_rings, sq_flags)),
+				      &sq_flags, sizeof(sq_flags));
+	}
+	spin_unlock(&ctx->wasm_shadow_lock);
+}
+
+void io_wasm_publish_cq(struct io_ring_ctx *ctx)
+{
+	struct io_rings *rings = ctx->rings;
+	unsigned long cq_addr, cq_size;
+	size_t cqe_size;
+	u32 new_tail, old_tail, count, i, mask;
+
+	if (!rings || !current->mm || current->mm != ctx->wasm_mm)
+		return;
+
+	spin_lock(&ctx->wasm_shadow_lock);
+	cq_addr = ctx->wasm_cq_user_addr ? ctx->wasm_cq_user_addr : ctx->wasm_sq_user_addr;
+	cq_size = ctx->wasm_cq_user_addr ? ctx->wasm_cq_user_size : ctx->wasm_sq_user_size;
+	if (!cq_addr || cq_size < sizeof(*rings))
+		goto out_unlock;
+
+	new_tail = ctx->cached_cq_tail;
+	old_tail = ctx->wasm_published_cq_tail;
+	if (old_tail == new_tail)
+		goto out_unlock;
+
+	count = min_t(u32, new_tail - old_tail, ctx->cq_entries);
+	old_tail = new_tail - count;
+	mask = ctx->cq_entries - 1;
+	cqe_size = (ctx->flags & IORING_SETUP_CQE32) ?
+		   2 * sizeof(struct io_uring_cqe) :
+		   sizeof(struct io_uring_cqe);
+
+	for (i = 0; i < count; i++) {
+		u32 off = (old_tail + i) & mask;
+		u32 src_off = (ctx->flags & IORING_SETUP_CQE32) ? (off << 1) : off;
+		unsigned long cqe_off = offsetof(struct io_rings, cqes) +
+					(unsigned long)off * cqe_size;
+
+		if (cqe_off + cqe_size > cq_size)
+			break;
+		if (wasm_user_write((void __user *)(cq_addr + cqe_off),
+				    &rings->cqes[src_off], cqe_size))
+			goto out_unlock;
+	}
+
+	/*
+	 * Ensure newly written CQEs are visible in user linear memory before
+	 * advancing user cq.tail.
+	 */
+	smp_wmb();
+
+	if (!wasm_user_write((void __user *)(cq_addr + offsetof(struct io_rings, cq.tail)),
+			     &new_tail, sizeof(new_tail)))
+		ctx->wasm_published_cq_tail = new_tail;
+
+out_unlock:
+	spin_unlock(&ctx->wasm_shadow_lock);
+}
+#endif
 
 #endif /* !CONFIG_MMU */
