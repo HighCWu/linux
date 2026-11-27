@@ -933,7 +933,7 @@ static int __io_read(struct io_kiocb *req, struct io_br_sel *sel,
 		return ret;
 	req->cqe.res = iov_iter_count(&io->iter);
 
-	if (force_nonblock) {
+	if (force_nonblock && !(IS_ENABLED(CONFIG_WASM) && (req->flags & REQ_F_ISREG))) {
 		/* If the file doesn't support async, just async punt */
 		if (unlikely(!io_file_supports_nowait(req, EPOLLIN)))
 			return -EAGAIN;
@@ -1143,7 +1143,7 @@ int io_write(struct io_kiocb *req, unsigned int issue_flags)
 		return ret;
 	req->cqe.res = iov_iter_count(&io->iter);
 
-	if (force_nonblock) {
+	if (force_nonblock && !(IS_ENABLED(CONFIG_WASM) && (req->flags & REQ_F_ISREG))) {
 		/* If the file doesn't support async, just async punt */
 		if (unlikely(!io_file_supports_nowait(req, EPOLLOUT)))
 			goto ret_eagain;
