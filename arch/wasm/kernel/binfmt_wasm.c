@@ -2,7 +2,9 @@
 
 #include <linux/auxvec.h>
 #include <linux/binfmts.h>
+#include <linux/coredump.h>
 #include <linux/cred.h>
+#include <linux/elf.h>
 #include <linux/highmem.h>
 #include <linux/jiffies.h>
 #include <linux/mm.h>
@@ -63,6 +65,9 @@ struct wasm_exec_args {
 };
 
 static int load_wasm_binary(struct linux_binprm *bprm);
+#ifdef CONFIG_COREDUMP
+static int wasm_core_dump(struct coredump_params *cprm);
+#endif
 
 static u32 user_memory_limit_pages(void)
 {
@@ -84,6 +89,9 @@ static u32 user_memory_limit_pages(void)
 static struct linux_binfmt wasm_format = {
 	.module = THIS_MODULE,
 	.load_binary = load_wasm_binary,
+#ifdef CONFIG_COREDUMP
+	.core_dump = wasm_core_dump,
+#endif
 };
 
 static int file_get_size(struct file *f, loff_t *size)
@@ -471,6 +479,159 @@ err:
 	kfree(chunk);
 	return ret;
 }
+
+#ifdef CONFIG_COREDUMP
+struct wasm_core_note {
+	u32 pid;
+	u32 tid;
+	u32 signo;
+	u32 code;
+	u64 fault_addr;
+	char comm[TASK_COMM_LEN];
+	struct pt_regs regs;
+};
+
+static int wasm_core_dump_range(struct coredump_params *cprm, void *bounce,
+				size_t bounce_size, unsigned long start,
+				unsigned long dump_size)
+{
+	unsigned long offset = 0;
+
+	while (offset < dump_size) {
+		size_t chunk = min_t(unsigned long, dump_size - offset,
+				     bounce_size);
+		unsigned long uncopied;
+
+		if (fatal_signal_pending(current))
+			return 0;
+
+		uncopied = copy_from_user(bounce,
+					  (const void __user *)(start + offset),
+					  chunk);
+		if (uncopied) {
+			if (uncopied > chunk)
+				uncopied = chunk;
+			memset((char *)bounce + (chunk - uncopied), 0,
+			       uncopied);
+		}
+		if (!dump_emit(cprm, bounce, (int)chunk))
+			return 0;
+		offset += chunk;
+	}
+	return 1;
+}
+
+static int wasm_core_dump(struct coredump_params *cprm)
+{
+	static const char note_name[8] = "WASM\0\0\0";
+	struct elfhdr elf = { 0 };
+	struct elf_note nhdr = { 0 };
+	struct wasm_core_note note = { 0 };
+	struct elf_phdr *phdrs = NULL;
+	void *bounce = NULL;
+	size_t bounce_size = SZ_16K;
+	int vma_count = min_t(int, cprm->vma_count, 65534);
+	int phnum = 1 + vma_count;
+	loff_t offset;
+	size_t note_size;
+	int i;
+	int has_dumped = 0;
+
+	memcpy(elf.e_ident, ELFMAG, SELFMAG);
+	elf.e_ident[EI_CLASS] = ELF_CLASS;
+	elf.e_ident[EI_DATA] = ELFDATA2LSB;
+	elf.e_ident[EI_VERSION] = EV_CURRENT;
+	elf.e_ident[EI_OSABI] = ELFOSABI_LINUX;
+	elf.e_type = ET_CORE;
+	elf.e_machine = EM_NONE;
+	elf.e_version = EV_CURRENT;
+	elf.e_phoff = sizeof(elf);
+	elf.e_ehsize = sizeof(elf);
+	elf.e_phentsize = sizeof(*phdrs);
+	elf.e_phnum = (Elf_Half)phnum;
+
+	note.pid = (u32)task_tgid_vnr(current);
+	note.tid = (u32)task_pid_vnr(current);
+	if (cprm->siginfo) {
+		note.signo = (u32)cprm->siginfo->si_signo;
+		note.code = (u32)cprm->siginfo->si_code;
+		note.fault_addr = (u64)(uintptr_t)cprm->siginfo->si_addr;
+	}
+	memcpy(note.comm, current->comm, sizeof(note.comm));
+	note.regs = *task_pt_regs(current);
+
+	nhdr.n_namesz = 5;
+	nhdr.n_descsz = sizeof(note);
+	nhdr.n_type = NT_PRSTATUS;
+	note_size = sizeof(nhdr) + sizeof(note_name) + round_up(sizeof(note), 4);
+
+	phdrs = kvcalloc(phnum, sizeof(*phdrs), GFP_KERNEL);
+	if (!phdrs)
+		goto out;
+
+	bounce = kmalloc(bounce_size, GFP_KERNEL);
+	if (!bounce)
+		goto out;
+
+	offset = sizeof(elf) + (loff_t)phnum * sizeof(*phdrs);
+	phdrs[0].p_type = PT_NOTE;
+	phdrs[0].p_offset = offset;
+	phdrs[0].p_filesz = note_size;
+	phdrs[0].p_align = 4;
+	offset += (loff_t)note_size;
+
+	for (i = 0; i < vma_count; i++) {
+		const struct core_vma_metadata *m = cprm->vma_meta + i;
+		struct elf_phdr *ph = &phdrs[1 + i];
+
+		ph->p_type = PT_LOAD;
+		ph->p_flags = ((m->flags & VM_READ) ? PF_R : 0) |
+			      ((m->flags & VM_WRITE) ? PF_W : 0) |
+			      ((m->flags & VM_EXEC) ? PF_X : 0);
+		ph->p_offset = offset;
+		ph->p_vaddr = m->start;
+		ph->p_paddr = 0;
+		ph->p_filesz = m->dump_size;
+		ph->p_memsz = m->end - m->start;
+		ph->p_align = PAGE_SIZE;
+		offset += (loff_t)m->dump_size;
+	}
+
+	if (!dump_emit(cprm, &elf, sizeof(elf)))
+		goto out;
+	if (!dump_emit(cprm, phdrs, (int)((size_t)phnum * sizeof(*phdrs))))
+		goto out;
+	if (!dump_emit(cprm, &nhdr, sizeof(nhdr)))
+		goto out;
+	if (!dump_emit(cprm, note_name, sizeof(note_name)))
+		goto out;
+	if (!dump_emit(cprm, &note, sizeof(note)))
+		goto out;
+	if (round_up(sizeof(note), 4) > sizeof(note)) {
+		static const char pad[4] = { 0 };
+		size_t pad_len = round_up(sizeof(note), 4) - sizeof(note);
+
+		if (!dump_emit(cprm, pad, (int)pad_len))
+			goto out;
+	}
+
+	for (i = 0; i < vma_count; i++) {
+		const struct core_vma_metadata *m = cprm->vma_meta + i;
+
+		if (!m->dump_size)
+			continue;
+		if (!wasm_core_dump_range(cprm, bounce, bounce_size, m->start,
+					  m->dump_size))
+			goto out;
+	}
+
+	has_dumped = 1;
+out:
+	kfree(bounce);
+	kvfree(phdrs);
+	return has_dumped;
+}
+#endif
 
 static int __init init_wasm_binfmt(void)
 {
