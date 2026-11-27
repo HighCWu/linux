@@ -50,6 +50,21 @@ static void vw_get(struct virtio_device *vdev, unsigned offset, void *buf,
 	memcpy(buf, vw_dev->config + offset, len);
 }
 
+#ifdef CONFIG_VIRTIO_INPUT
+struct vw_set_config_req {
+	struct virtio_wasm_device *vw_dev;
+	u32 offset;
+	u32 len;
+};
+
+static void _set_config(void *arg)
+{
+	struct vw_set_config_req *req = arg;
+
+	wasm_virtio_set_config(req->vw_dev->host_id, req->offset, req->len);
+}
+#endif
+
 static void vw_set(struct virtio_device *vdev, unsigned offset, const void *buf,
 		   unsigned len)
 {
@@ -62,6 +77,16 @@ static void vw_set(struct virtio_device *vdev, unsigned offset, const void *buf,
 	}
 
 	memcpy(vw_dev->config + offset, buf, len);
+#ifdef CONFIG_VIRTIO_INPUT
+	if (vdev->id.device == VIRTIO_ID_INPUT) {
+		struct vw_set_config_req req = {
+			.vw_dev = vw_dev,
+			.offset = offset,
+			.len = len,
+		};
+		wasm_kernel_run_on_main(_set_config, &req);
+	}
+#endif
 }
 
 static void _notify(void *arg)

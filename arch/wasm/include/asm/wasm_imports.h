@@ -147,6 +147,9 @@ void wasm_import(virtio, set_features)(u32 id, u64 features);
 
 void wasm_import(virtio, setup)(u32 id, u32 config_irq, u8 *config,
 				u32 config_len);
+#ifdef CONFIG_VIRTIO_INPUT
+void wasm_import(virtio, set_config)(u32 id, u32 offset, u32 len);
+#endif
 void wasm_import(virtio, reset)(u32 id);
 
 void wasm_import(virtio, enable_vring)(u32 id, u32 index, u32 size,
