@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/syscalls.h>
+#include <asm/wasm_imports.h>
 
 #ifdef CONFIG_WASM_ELF_CONTAINER
 #include "elf_container.h"
@@ -521,6 +522,79 @@ static int wasm_core_dump_range(struct coredump_params *cprm, void *bounce,
 	return 1;
 }
 
+struct wasm_core_seg {
+	unsigned long start;
+	unsigned long size;
+};
+
+#define WASM_CORE_MAX_SEGS 1024
+
+static u64 wasm_core_resident_bytes(void)
+{
+	u32 low = 0;
+	u32 high = (u32)min_t(u64, user_memory_limit_pages(),
+			      ((u64)TASK_SIZE + 1) / SZ_64K);
+
+	while (low < high) {
+		u32 mid = low + (high - low + 1) / 2;
+		unsigned long probe_addr = (unsigned long)(mid - 1) * SZ_64K;
+		u8 byte;
+
+		if (probe_addr >= TASK_SIZE) {
+			high = mid - 1;
+			continue;
+		}
+		if (copy_from_user(&byte, (const void __user *)probe_addr,
+				   sizeof(byte)) == 0)
+			low = mid;
+		else
+			high = mid - 1;
+	}
+
+	return (u64)low * SZ_64K;
+}
+
+static int wasm_core_collect_segs(struct wasm_core_seg *segs, int max_segs)
+{
+	u64 resident_bytes = wasm_core_resident_bytes();
+	u64 cursor = 0;
+	int count = 0;
+
+	while (cursor < resident_bytes && count < max_segs) {
+		unsigned long rem_pages =
+			(unsigned long)((resident_bytes - cursor) >> PAGE_SHIFT);
+		long span;
+
+		if (!rem_pages)
+			break;
+		span = wasm_user_mmap_query_v1_span((unsigned long)cursor,
+						    rem_pages);
+		if (span < 0) {
+			count = 0;
+			break;
+		}
+		if (span == 0) {
+			cursor += PAGE_SIZE;
+			continue;
+		}
+		if ((unsigned long)span > rem_pages)
+			span = (long)rem_pages;
+		segs[count].start = (unsigned long)cursor;
+		segs[count].size = (unsigned long)span * PAGE_SIZE;
+		count++;
+		cursor += (u64)span * PAGE_SIZE;
+	}
+
+	if (count == 0 && resident_bytes > 0 && max_segs > 0) {
+		segs[0].start = 0;
+		segs[0].size = (unsigned long)min_t(u64, resident_bytes,
+						    TASK_SIZE);
+		count = 1;
+	}
+
+	return count;
+}
+
 static int wasm_core_dump(struct coredump_params *cprm)
 {
 	static const char note_name[8] = "WASM\0\0\0";
@@ -528,14 +602,28 @@ static int wasm_core_dump(struct coredump_params *cprm)
 	struct elf_note nhdr = { 0 };
 	struct wasm_core_note note = { 0 };
 	struct elf_phdr *phdrs = NULL;
+	struct wasm_core_seg *linear_segs = NULL;
 	void *bounce = NULL;
 	size_t bounce_size = SZ_16K;
 	int vma_count = min_t(int, cprm->vma_count, 65534);
-	int phnum = 1 + vma_count;
+	int linear_count = 0;
+	int seg_count;
+	int phnum;
 	loff_t offset;
 	size_t note_size;
 	int i;
 	int has_dumped = 0;
+
+	if (vma_count == 0) {
+		linear_segs = kvcalloc(WASM_CORE_MAX_SEGS,
+				       sizeof(*linear_segs), GFP_KERNEL);
+		if (!linear_segs)
+			goto out;
+		linear_count = wasm_core_collect_segs(linear_segs,
+						      WASM_CORE_MAX_SEGS);
+	}
+	seg_count = vma_count > 0 ? vma_count : linear_count;
+	phnum = 1 + seg_count;
 
 	memcpy(elf.e_ident, ELFMAG, SELFMAG);
 	elf.e_ident[EI_CLASS] = ELF_CLASS;
@@ -580,21 +668,38 @@ static int wasm_core_dump(struct coredump_params *cprm)
 	phdrs[0].p_align = 4;
 	offset += (loff_t)note_size;
 
-	for (i = 0; i < vma_count; i++) {
-		const struct core_vma_metadata *m = cprm->vma_meta + i;
-		struct elf_phdr *ph = &phdrs[1 + i];
+	if (vma_count > 0) {
+		for (i = 0; i < vma_count; i++) {
+			const struct core_vma_metadata *m = cprm->vma_meta + i;
+			struct elf_phdr *ph = &phdrs[1 + i];
 
-		ph->p_type = PT_LOAD;
-		ph->p_flags = ((m->flags & VM_READ) ? PF_R : 0) |
-			      ((m->flags & VM_WRITE) ? PF_W : 0) |
-			      ((m->flags & VM_EXEC) ? PF_X : 0);
-		ph->p_offset = offset;
-		ph->p_vaddr = m->start;
-		ph->p_paddr = 0;
-		ph->p_filesz = m->dump_size;
-		ph->p_memsz = m->end - m->start;
-		ph->p_align = PAGE_SIZE;
-		offset += (loff_t)m->dump_size;
+			ph->p_type = PT_LOAD;
+			ph->p_flags = ((m->flags & VM_READ) ? PF_R : 0) |
+				      ((m->flags & VM_WRITE) ? PF_W : 0) |
+				      ((m->flags & VM_EXEC) ? PF_X : 0);
+			ph->p_offset = offset;
+			ph->p_vaddr = m->start;
+			ph->p_paddr = 0;
+			ph->p_filesz = m->dump_size;
+			ph->p_memsz = m->end - m->start;
+			ph->p_align = PAGE_SIZE;
+			offset += (loff_t)m->dump_size;
+		}
+	} else {
+		for (i = 0; i < linear_count; i++) {
+			const struct wasm_core_seg *s = &linear_segs[i];
+			struct elf_phdr *ph = &phdrs[1 + i];
+
+			ph->p_type = PT_LOAD;
+			ph->p_flags = PF_R | PF_W;
+			ph->p_offset = offset;
+			ph->p_vaddr = s->start;
+			ph->p_paddr = 0;
+			ph->p_filesz = s->size;
+			ph->p_memsz = s->size;
+			ph->p_align = PAGE_SIZE;
+			offset += (loff_t)s->size;
+		}
 	}
 
 	if (!dump_emit(cprm, &elf, sizeof(elf)))
@@ -615,20 +720,33 @@ static int wasm_core_dump(struct coredump_params *cprm)
 			goto out;
 	}
 
-	for (i = 0; i < vma_count; i++) {
-		const struct core_vma_metadata *m = cprm->vma_meta + i;
+	if (vma_count > 0) {
+		for (i = 0; i < vma_count; i++) {
+			const struct core_vma_metadata *m = cprm->vma_meta + i;
 
-		if (!m->dump_size)
-			continue;
-		if (!wasm_core_dump_range(cprm, bounce, bounce_size, m->start,
-					  m->dump_size))
-			goto out;
+			if (!m->dump_size)
+				continue;
+			if (!wasm_core_dump_range(cprm, bounce, bounce_size,
+						  m->start, m->dump_size))
+				goto out;
+		}
+	} else {
+		for (i = 0; i < linear_count; i++) {
+			const struct wasm_core_seg *s = &linear_segs[i];
+
+			if (!s->size)
+				continue;
+			if (!wasm_core_dump_range(cprm, bounce, bounce_size,
+						  s->start, s->size))
+				goto out;
+		}
 	}
 
 	has_dumped = 1;
 out:
 	kfree(bounce);
 	kvfree(phdrs);
+	kvfree(linear_segs);
 	return has_dumped;
 }
 #endif
