@@ -56,12 +56,21 @@ vmlinux-o-ld-args-$(CONFIG_BUILTIN_MODULE_RANGES)	+= -Map=$@.map
 
 quiet_cmd_ld_vmlinux.o = LD      $@
 ifdef CONFIG_LD_IS_WASMLD
+ifdef CONFIG_KALLSYMS
+      cmd_ld_vmlinux.o = \
+	$(CONFIG_SHELL) $(srctree)/arch/wasm/scripts/link-wasm-vmlinux.sh $@ \
+	$(addprefix -T , $(initcalls-lds)) \
+	--whole-archive vmlinux.a --no-whole-archive \
+	$(KBUILD_VMLINUX_LIBS) \
+	$(cmd_objtool)
+else
       cmd_ld_vmlinux.o = \
 	$(LD) ${KBUILD_LDFLAGS} --no-gc-sections -o $@ \
 	$(addprefix -T , $(initcalls-lds)) \
 	--whole-archive vmlinux.a --no-whole-archive \
 	$(KBUILD_VMLINUX_LIBS) \
 	$(cmd_objtool)
+endif
 else
       cmd_ld_vmlinux.o = \
 	$(LD) ${KBUILD_LDFLAGS} -r -o $@ \
